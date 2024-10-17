@@ -2,7 +2,6 @@ streamlit
 openai
 moviepy
 requests
-tempfile
 datasets
-TTS
+tts
 psutil
