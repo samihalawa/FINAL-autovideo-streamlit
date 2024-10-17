@@ -14,10 +14,12 @@ from PIL import Image, ImageDraw, ImageFont
 import threading
 import shutil
 from moviepy.video.tools.drawing import color_gradient
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+import openai
+import json
 
 # Set your OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
 
 # 1. Function to generate storyboard based on user prompt using structured JSON
 @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(5))
@@ -34,9 +36,13 @@ def generate_storyboard(prompt, style="motivational"):
         ]
     )
     try:
-        return response['choices'][0]['message']['content']
-    except (KeyError, IndexError, TypeError):
-        return "{}"
+        # Parsing the response content as a JSON string
+        storyboard = response['choices'][0]['message']['content']
+        return json.loads(storyboard)  # Convert the storyboard string to JSON format
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return {}
+
+
 
 
 # 2. Function to parse structured JSON storyboard data
