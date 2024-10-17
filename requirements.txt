@@ -1,0 +1,8 @@
+streamlit
+openai
+moviepy
+requests
+tempfile
+datasets
+TTS
+psutil
