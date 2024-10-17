@@ -34,9 +34,10 @@ def generate_storyboard(prompt, style="motivational"):
         ]
     )
     try:
-        return json.loads(response.choices[0].message['content'])
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-        return {}
+        return response['choices'][0]['message']['content']
+    except (KeyError, IndexError, TypeError):
+        return "{}"
+
 
 # 2. Function to parse structured JSON storyboard data
 def parse_storyboard(storyboard):
