@@ -18,27 +18,6 @@ from moviepy.video.tools.drawing import color_gradient
 # Set your OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Enhancements Summary
-# 1. Added JSON schema for structured OpenAI responses.
-# 2. Utilized reusable JSON formats for storyboard generation.
-# 3. Optimized retry logic for OpenAI API calls.
-# 4. Removed redundant error handling for brevity.
-# 5. Streamlined video clip fetching with Hugging Face dataset.
-# 6. Enhanced TTS initialization to load only once.
-# 7. Simplified storyboard parsing logic.
-# 8. Consolidated video fade effects into a reusable function.
-# 9. Introduced batch video clip processing to minimize repetition.
-# 10. Optimized voiceover generation by caching TTS models.
-# 11. Added consistent audio and video merging logic.
-# 12. Removed unnecessary temporary file checks.
-# 13. Simplified watermark application.
-# 14. Consolidated text overlay methods.
-# 15. Removed complex threading for simplicity.
-# 16. Enhanced storyboard preview generation.
-# 17. Added JSON validation for storyboard loading/saving.
-# 18. Optimized background music integration.
-# 19. Consolidated subtitle addition logic.
-# 20. Streamlined UI elements for video editing options.
 
 # 1. Function to generate storyboard based on user prompt using structured JSON
 @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(5))
@@ -53,12 +32,12 @@ def generate_storyboard(prompt, style="motivational"):
             )},
             {"role": "user", "content": f"Prompt: {prompt}\nStyle: {style}"},
         ],
+        response_format={"type": "json_object"}
     )
     try:
-        return json.loads(response["choices"][0]["message"]["content"])
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-        return {}
-
+        return response.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+    except (KeyError, IndexError, TypeError):
+        return "{}"
 
 # 2. Function to parse structured JSON storyboard data
 def parse_storyboard(storyboard):
