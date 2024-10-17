@@ -6,7 +6,7 @@ import requests
 from tempfile import NamedTemporaryFile
 from datasets import load_dataset
 from TTS.api import TTS
-from moviepy.video.fx.all import fadein, fadeout, resize, crossfadein
+from moviepy.video.fx.all import fadein, fadeout, resize
 import psutil
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import json
@@ -157,7 +157,7 @@ def adjust_audio_volume(audio_clip, volume_level=1.0):
 
 # 22. Function to animate scene transitions
 def animate_scene_transition(clip1, clip2, duration=1):
-    return mpe.concatenate_videoclips([clip1.crossfadeout(duration), clip2.crossfadein(duration)])
+    return mpe.concatenate_videoclips([fadeout(clip1, duration), fadein(clip2, duration)])
 
 # 23. Function to crop video clips
 def crop_video(clip, x1, y1, x2, y2):
