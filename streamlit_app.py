@@ -5,7 +5,7 @@ import moviepy.editor as mpe
 import requests
 from tempfile import NamedTemporaryFile
 from datasets import load_dataset
-from tts import TTS
+from TTS.api import TTS
 from moviepy.video.fx.all import fadein, fadeout, resize, crossfadein
 import psutil
 from tenacity import retry, wait_random_exponential, stop_after_attempt
