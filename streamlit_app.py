@@ -7,12 +7,9 @@ import moviepy.editor as mpe
 import requests
 from tempfile import NamedTemporaryFile
 from datasets import load_dataset
-from TTS.api import TTS
+from tts import TTS
 from moviepy.video.fx.all import fadein, fadeout, resize, crossfadein
 import psutil
-from dotenv import load_dotenv
-os.environ['PGGSSENCMODE'] = 'disable'
-load_dotenv()
 
 # Set your OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
