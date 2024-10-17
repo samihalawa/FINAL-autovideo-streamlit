@@ -71,200 +71,307 @@ def generate_voiceover(narration_text, voice_speed=1.0, pitch=1.0):
 # 6. Function to initialize TTS model once
 def initialize_tts_model():
     if not hasattr(initialize_tts_model, "tts_model"):
-        initialize_tts_model.tts_model = TTS.list_models()[0]
+        available_models = TTS.list_models()
+        if not available_models:
+            raise ValueError("No TTS models available. Please check the library version and internet connection.")
+        initialize_tts_model.tts_model = available_models[0]
     return initialize_tts_model.tts_model
 
 # 7. Function to create and finalize the video
 def create_video(video_clips, narration_file):
-    final_clip = mpe.concatenate_videoclips([
-        apply_fade_effects(add_text_overlay(clip['clip'], clip['scene'].get('overlay', ''))) for clip in video_clips
-    ], method='compose')
-    return add_narration(final_clip, narration_file).write_videofile("final_video.mp4", fps=24, codec='libx264')
+    try:
+        final_clip = mpe.concatenate_videoclips([
+            apply_fade_effects(add_text_overlay(clip['clip'], clip['scene'].get('overlay', ''))) for clip in video_clips
+        ], method='compose')
+        final_clip = add_narration(final_clip, narration_file)
+        final_clip.write_videofile("final_video.mp4", fps=24, codec='libx264')
+    except Exception as e:
+        raise RuntimeError(f"Error during video creation: {e}")
 
 # 8. Function to apply fade-in/fade-out effects to video clips
 def apply_fade_effects(clip, duration=1):
-    return fadein(clip, duration).fx(fadeout, duration)
+    try:
+        return fadein(clip, duration).fx(fadeout, duration)
+    except Exception as e:
+        raise ValueError(f"Error applying fade effects: {e}")
 
 # 9. Function to add text overlay to video clips
 def add_text_overlay(clip, text):
     if text:
-        text_clip = mpe.TextClip(text, fontsize=70, color='white', font='Arial-Bold')
-        text_clip = text_clip.set_position('center').set_duration(clip.duration)
-        return mpe.CompositeVideoClip([clip, text_clip])
+        try:
+            text_clip = mpe.TextClip(text, fontsize=70, color='white', font='Arial-Bold')
+            text_clip = text_clip.set_position('center').set_duration(clip.duration)
+            return mpe.CompositeVideoClip([clip, text_clip])
+        except Exception as e:
+            raise ValueError(f"Error adding text overlay: {e}")
     return clip
 
 # 10. Function to add narration to video clip
 def add_narration(clip, narration_file):
-    return clip.set_audio(mpe.AudioFileClip(narration_file))
+    try:
+        return clip.set_audio(mpe.AudioFileClip(narration_file))
+    except Exception as e:
+        raise ValueError(f"Error adding narration: {e}")
 
 # 11. Function to apply brightness and contrast adjustments to video clips
 def apply_brightness_contrast(clip, brightness=1.0, contrast=1.0):
-    return clip.fx(mpe.vfx.colorx, brightness).fx(mpe.vfx.lum_contrast, contrast=contrast)
+    try:
+        return clip.fx(mpe.vfx.colorx, brightness).fx(mpe.vfx.lum_contrast, contrast=contrast)
+    except Exception as e:
+        raise ValueError(f"Error adjusting brightness/contrast: {e}")
 
 # 12. Function to add watermarks to video clips
 def add_watermark(clip, watermark_text="Sample Watermark"):
-    watermark = mpe.TextClip(watermark_text, fontsize=30, color='white', font='Arial')
-    watermark = watermark.set_position(('right', 'bottom')).set_duration(clip.duration)
-    return mpe.CompositeVideoClip([clip, watermark])
+    try:
+        watermark = mpe.TextClip(watermark_text, fontsize=30, color='white', font='Arial')
+        watermark = watermark.set_position(('right', 'bottom')).set_duration(clip.duration)
+        return mpe.CompositeVideoClip([clip, watermark])
+    except Exception as e:
+        raise ValueError(f"Error adding watermark: {e}")
 
 # 13. Function to animate text sequences
 def create_animated_text(text, duration=5):
-    txt_clip = mpe.TextClip(text, fontsize=70, color='yellow', font='Arial-Bold', kerning=5)
-    txt_clip = txt_clip.set_position('center').set_duration(duration).fadein(1).fadeout(1)
-    return txt_clip
+    try:
+        txt_clip = mpe.TextClip(text, fontsize=70, color='yellow', font='Arial-Bold', kerning=5)
+        txt_clip = txt_clip.set_position('center').set_duration(duration).fadein(1).fadeout(1)
+        return txt_clip
+    except Exception as e:
+        raise ValueError(f"Error creating animated text: {e}")
 
 # 14. Function to download additional video assets (e.g., background music)
 def download_additional_assets(url):
-    response = requests.get(url)
-    if response.status_code == 200:
-        temp_asset_file = NamedTemporaryFile(delete=False, suffix='.mp3')
-        temp_asset_file.write(response.content)
-        return temp_asset_file.name
-    return None
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            temp_asset_file = NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_asset_file.write(response.content)
+            return temp_asset_file.name
+        else:
+            raise ValueError("Failed to download asset. Invalid URL or server error.")
+    except Exception as e:
+        raise ValueError(f"Error downloading asset: {e}")
 
 # 15. Function to add background music to video
 def add_background_music(clip, music_file):
-    background_audio = mpe.AudioFileClip(music_file)
-    return clip.set_audio(mpe.CompositeAudioClip([clip.audio, background_audio.volumex(0.1)]))
+    try:
+        background_audio = mpe.AudioFileClip(music_file)
+        return clip.set_audio(mpe.CompositeAudioClip([clip.audio, background_audio.volumex(0.1)]))
+    except Exception as e:
+        raise ValueError(f"Error adding background music: {e}")
 
 # 16. Function to split video into parts for processing
 def split_video(video_clip, part_duration=10):
-    return [video_clip.subclip(start, min(start + part_duration, video_clip.duration)) for start in range(0, int(video_clip.duration), part_duration)]
+    try:
+        return [video_clip.subclip(start, min(start + part_duration, video_clip.duration)) for start in range(0, int(video_clip.duration), part_duration)]
+    except Exception as e:
+        raise ValueError(f"Error splitting video: {e}")
 
 # 17. Function to merge video parts back together
 def merge_video_parts(video_parts):
-    return mpe.concatenate_videoclips(video_parts, method="compose")
+    try:
+        return mpe.concatenate_videoclips(video_parts, method="compose")
+    except Exception as e:
+        raise ValueError(f"Error merging video parts: {e}")
 
 # 18. Function to log system resources during video generation
 def log_system_resources():
-    memory = psutil.virtual_memory()
-    cpu = psutil.cpu_percent()
-    st.write(f"Memory Usage: {memory.percent}% | CPU Usage: {cpu}%")
+    try:
+        memory = psutil.virtual_memory()
+        cpu = psutil.cpu_percent()
+        st.write(f"Memory Usage: {memory.percent}% | CPU Usage: {cpu}%")
+    except Exception as e:
+        st.error(f"Error logging system resources: {e}")
 
 # 19. Function to save a temporary JSON backup of generated storyboard
 def save_storyboard_backup(storyboard, filename="storyboard_backup.json"):
-    with open(filename, 'w') as f:
-        json.dump(storyboard, f)
+    try:
+        with open(filename, 'w') as f:
+            json.dump(storyboard, f)
+    except Exception as e:
+        raise ValueError(f"Error saving storyboard backup: {e}")
 
 # 20. Function to load a saved storyboard from backup
 def load_storyboard_backup(filename="storyboard_backup.json"):
-    with open(filename, 'r') as f:
-        return json.load(f)
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        raise ValueError(f"Error loading storyboard backup: {e}")
 
 # 21. Function to adjust audio volume levels
 def adjust_audio_volume(audio_clip, volume_level=1.0):
-    return audio_clip.volumex(volume_level)
+    try:
+        return audio_clip.volumex(volume_level)
+    except Exception as e:
+        raise ValueError(f"Error adjusting audio volume: {e}")
 
 # 22. Function to animate scene transitions
 def animate_scene_transition(clip1, clip2, duration=1):
-    return mpe.concatenate_videoclips([fadeout(clip1, duration), fadein(clip2, duration)])
+    try:
+        return mpe.concatenate_videoclips([fadeout(clip1, duration), fadein(clip2, duration)])
+    except Exception as e:
+        raise ValueError(f"Error animating scene transition: {e}")
 
 # 23. Function to crop video clips
 def crop_video(clip, x1, y1, x2, y2):
-    return clip.crop(x1=x1, y1=y1, x2=x2, y2=y2)
+    try:
+        return clip.crop(x1=x1, y1=y1, x2=x2, y2=y2)
+    except Exception as e:
+        raise ValueError(f"Error cropping video: {e}")
 
 # 24. Function to calculate estimated video rendering time
 def calculate_estimated_render_time(duration, resolution=(1280, 720)):
-    return duration * (resolution[0] * resolution[1]) / 1e6
+    try:
+        return duration * (resolution[0] * resolution[1]) / 1e6
+    except Exception as e:
+        raise ValueError(f"Error calculating render time: {e}")
 
 # 25. Function to run video rendering in a separate thread
 def run_video_rendering_thread(target_function, *args):
-    rendering_thread = threading.Thread(target=target_function, args=args)
-    rendering_thread.start()
-    return rendering_thread
+    try:
+        rendering_thread = threading.Thread(target=target_function, args=args)
+        rendering_thread.start()
+        return rendering_thread
+    except Exception as e:
+        raise ValueError(f"Error running rendering thread: {e}")
 
 # 26. Function to manage temporary directories
 def manage_temp_directory(directory_path):
-    if os.path.exists(directory_path):
-        shutil.rmtree(directory_path)
-    os.makedirs(directory_path)
+    try:
+        if os.path.exists(directory_path):
+            shutil.rmtree(directory_path)
+        os.makedirs(directory_path)
+    except Exception as e:
+        raise ValueError(f"Error managing temporary directory: {e}")
 
 # 27. Function to provide video editing tips in the UI
 def show_video_editing_tips():
-    st.sidebar.header("Video Editing Tips")
-    st.sidebar.text("- Keep it short and engaging.")
-    st.sidebar.text("- Use consistent fonts and colors.")
-    st.sidebar.text("- Add background music for impact.")
+    try:
+        st.sidebar.header("Video Editing Tips")
+        st.sidebar.text("- Keep it short and engaging.")
+        st.sidebar.text("- Use consistent fonts and colors.")
+        st.sidebar.text("- Add background music for impact.")
+    except Exception as e:
+        st.error(f"Error showing video editing tips: {e}")
 
 # 28. Function to add intro and outro sequences to video
 def add_intro_outro(clip, intro_text="Welcome", outro_text="Thank you for watching!"):
-    intro = create_animated_text(intro_text, duration=3)
-    outro = create_animated_text(outro_text, duration=3)
-    return mpe.concatenate_videoclips([intro, clip, outro])
+    try:
+        intro = create_animated_text(intro_text, duration=3)
+        outro = create_animated_text(outro_text, duration=3)
+        return mpe.concatenate_videoclips([intro, clip, outro])
+    except Exception as e:
+        raise ValueError(f"Error adding intro/outro: {e}")
 
 # 29. Function to adjust video speed
 def adjust_video_speed(clip, speed=1.0):
-    return clip.fx(mpe.vfx.speedx, speed)
+    try:
+        return clip.fx(mpe.vfx.speedx, speed)
+    except Exception as e:
+        raise ValueError(f"Error adjusting video speed: {e}")
 
 # 30. Function to overlay images on video
 def overlay_image_on_video(clip, image_path, position=(0, 0)):
-    image = mpe.ImageClip(image_path).set_duration(clip.duration).set_position(position)
-    return mpe.CompositeVideoClip([clip, image])
+    try:
+        image = mpe.ImageClip(image_path).set_duration(clip.duration).set_position(position)
+        return mpe.CompositeVideoClip([clip, image])
+    except Exception as e:
+        raise ValueError(f"Error overlaying image on video: {e}")
 
 # 31. Function to generate thumbnail for video
 def generate_video_thumbnail(clip, output_path="thumbnail.png"):
-    frame = clip.get_frame(1)
-    image = Image.fromarray(frame)
-    image.save(output_path)
-    return output_path
+    try:
+        frame = clip.get_frame(1)
+        image = Image.fromarray(frame)
+        image.save(output_path)
+        return output_path
+    except Exception as e:
+        raise ValueError(f"Error generating video thumbnail: {e}")
 
 # 32. Function to check system capabilities before rendering
 def check_system_capabilities():
-    memory = psutil.virtual_memory()
-    if memory.available < 500 * 1024 * 1024:  # Less than 500MB
-        st.warning("Low memory detected. Consider closing other applications.")
+    try:
+        memory = psutil.virtual_memory()
+        if memory.available < 500 * 1024 * 1024:  # Less than 500MB
+            st.warning("Low memory detected. Consider closing other applications.")
+    except Exception as e:
+        st.error(f"Error checking system capabilities: {e}")
 
 # 33. Function to generate a text overlay with gradient background
 def generate_gradient_text_overlay(text, clip_duration, size=(1920, 1080)):
-    gradient = color_gradient(size, p1=(0, 0), p2=(size[0], size[1]), color1=(255, 0, 0), color2=(0, 0, 255))
-    image = Image.fromarray(gradient)
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default()
-    text_size = draw.textsize(text, font=font)
-    draw.text(((size[0] - text_size[0]) / 2, (size[1] - text_size[1]) / 2), text, font=font, fill=(255, 255, 255))
-    image.save("gradient_overlay.png")
-    return mpe.ImageClip("gradient_overlay.png").set_duration(clip_duration)
+    try:
+        gradient = color_gradient(size, p1=(0, 0), p2=(size[0], size[1]), color1=(255, 0, 0), color2=(0, 0, 255))
+        image = Image.fromarray(gradient)
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        text_size = draw.textsize(text, font=font)
+        draw.text(((size[0] - text_size[0]) / 2, (size[1] - text_size[1]) / 2), text, font=font, fill=(255, 255, 255))
+        image.save("gradient_overlay.png")
+        return mpe.ImageClip("gradient_overlay.png").set_duration(clip_duration)
+    except Exception as e:
+        raise ValueError(f"Error generating gradient text overlay: {e}")
 
 # 34. Function to add subtitles to video
 def add_subtitles_to_video(clip, subtitles):
-    subtitle_clips = [
-        mpe.TextClip(subtitle['text'], fontsize=50, color='white', size=clip.size, font='Arial-Bold')
-        .set_position(('bottom')).set_start(subtitle['start']).set_duration(subtitle['duration'])
-        for subtitle in subtitles
-    ]
-    return mpe.CompositeVideoClip([clip] + subtitle_clips)
+    try:
+        subtitle_clips = [
+            mpe.TextClip(subtitle['text'], fontsize=50, color='white', size=clip.size, font='Arial-Bold')
+            .set_position(('bottom')).set_start(subtitle['start']).set_duration(subtitle['duration'])
+            for subtitle in subtitles
+        ]
+        return mpe.CompositeVideoClip([clip] + subtitle_clips)
+    except Exception as e:
+        raise ValueError(f"Error adding subtitles: {e}")
 
 # 35. Function to preview storyboard as a slideshow
 def preview_storyboard_slideshow(scenes, duration_per_scene=5):
-    slides = [create_animated_text(scene['title'], duration=duration_per_scene) for scene in scenes]
-    slideshow = mpe.concatenate_videoclips(slides, method='compose')
-    slideshow.write_videofile("storyboard_preview.mp4", fps=24, codec='libx264')
-    preview_video("storyboard_preview.mp4")
+    try:
+        slides = [create_animated_text(scene['title'], duration=duration_per_scene) for scene in scenes]
+        slideshow = mpe.concatenate_videoclips(slides, method='compose')
+        slideshow.write_videofile("storyboard_preview.mp4", fps=24, codec='libx264')
+        preview_video("storyboard_preview.mp4")
+    except Exception as e:
+        raise ValueError(f"Error creating storyboard slideshow: {e}")
 
 # 36. Function to add logo to video
 def add_logo_to_video(clip, logo_path, position=('right', 'top')):
-    logo = mpe.ImageClip(logo_path).set_duration(clip.duration).resize(height=100).set_position(position)
-    return mpe.CompositeVideoClip([clip, logo])
+    try:
+        logo = mpe.ImageClip(logo_path).set_duration(clip.duration).resize(height=100).set_position(position)
+        return mpe.CompositeVideoClip([clip, logo])
+    except Exception as e:
+        raise ValueError(f"Error adding logo to video: {e}")
 
 # 37. Function to compress video output for faster uploading
 def compress_video(input_path, output_path="compressed_video.mp4", bitrate="500k"):
-    os.system(f"ffmpeg -i {input_path} -b:v {bitrate} -bufsize {bitrate} {output_path}")
-    return output_path
+    try:
+        os.system(f"ffmpeg -i {input_path} -b:v {bitrate} -bufsize {bitrate} {output_path}")
+        return output_path
+    except Exception as e:
+        raise ValueError(f"Error compressing video: {e}")
 
 # 38. Function to adjust resolution dynamically based on system capacity
 def adjust_resolution_based_on_system(clip):
-    memory = psutil.virtual_memory()
-    resolution = (640, 360) if memory.available < 1000 * 1024 * 1024 else (1280, 720)
-    return resize(clip, newsize=resolution)
+    try:
+        memory = psutil.virtual_memory()
+        resolution = (640, 360) if memory.available < 1000 * 1024 * 1024 else (1280, 720)
+        return resize(clip, newsize=resolution)
+    except Exception as e:
+        raise ValueError(f"Error adjusting resolution: {e}")
 
 # 39. Function to handle session expiration or token errors
 def handle_session_expiration():
-    st.error("Session expired. Please refresh and try again.")
-    st.button("Refresh Page")
+    try:
+        st.error("Session expired. Please refresh and try again.")
+        st.button("Refresh Page")
+    except Exception as e:
+        st.error(f"Error handling session expiration: {e}")
 
 # 40. Function to apply black-and-white filter to video
 def apply_bw_filter(clip):
-    return clip.fx(mpe.vfx.blackwhite)
+    try:
+        return clip.fx(mpe.vfx.blackwhite)
+    except Exception as e:
+        raise ValueError(f"Error applying black-and-white filter: {e}")
 
 # Main function to run the Streamlit app
 def main():
@@ -273,6 +380,11 @@ def main():
     style = st.selectbox("Select a storyboard style", ["motivational", "dramatic", "educational", "funny"])
     voice_speed = st.slider("Select voice speed", 0.5, 2.0, 1.0)
     voice_pitch = st.slider("Select voice pitch", 0.5, 2.0, 1.0)
+    add_intro_outro_option = st.checkbox("Add Intro/Outro", value=True)
+    add_watermark_option = st.checkbox("Add Watermark", value=True)
+    watermark_text = st.text_input("Watermark Text", "Sample Watermark") if add_watermark_option else None
+    add_background_music_option = st.checkbox("Add Background Music", value=False)
+    music_url = st.text_input("Background Music URL") if add_background_music_option else None
 
     if st.button("Generate Video"):
         if not prompt.strip():
@@ -313,7 +425,26 @@ def main():
             st.success("Voiceover generated.")
 
             st.info("Creating final video...")
-            create_video(video_clips, narration_file)
+            processed_clips = []
+            for clip in video_clips:
+                if add_watermark_option:
+                    clip['clip'] = add_watermark(clip['clip'], watermark_text)
+                processed_clips.append(clip['clip'])
+
+            final_clip = mpe.concatenate_videoclips(processed_clips, method='compose')
+            if add_intro_outro_option:
+                final_clip = add_intro_outro(final_clip)
+
+            if music_url:
+                st.info("Downloading background music...")
+                music_file = download_additional_assets(music_url)
+                if music_file:
+                    final_clip = add_background_music(final_clip, music_file)
+                    st.success("Background music added.")
+                else:
+                    st.warning("Failed to download background music.")
+
+            final_clip.write_videofile("final_video.mp4", fps=24, codec='libx264')
             st.success("Video created successfully!")
 
             with open("final_video.mp4", 'rb') as video_file:
@@ -325,3 +456,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
