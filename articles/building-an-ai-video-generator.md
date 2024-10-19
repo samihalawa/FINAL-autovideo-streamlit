@@ -16,8 +16,9 @@ We'll use GPT-3.5-turbo for faster and more cost-effective script generation:
 
 ```python
 import openai
+import os
 
-openai.api_key = "your_openai_api_key"
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def generate_script(prompt, duration):
     response = openai.ChatCompletion.create(
@@ -46,7 +47,7 @@ def generate_images_for_scenes(scenes):
     
     images = []
     for scene in scenes:
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast("cuda"):
             image = pipe(scene['description'], num_inference_steps=30).images[0]
         images.append(image)
     return images
@@ -311,6 +312,38 @@ async function composeVideo(assets, duration) {
 }
 ```
 
+## 10. Error Handling and Logging
+
+Implement robust error handling and logging for better debugging and monitoring:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def create_video_workflow(prompt, duration, music_style):
+    try:
+        script = generate_script(prompt, duration)
+        logger.info(f"Generated script for prompt: {prompt}")
+        
+        scenes = parse_script(script)
+        images = generate_images_for_scenes(scenes)
+        logger.info(f"Generated {len(images)} images for scenes")
+        
+        video_clips = fetch_video_clips(scenes, index, video_features)
+        logger.info(f"Retrieved {len(video_clips)} video clips")
+        
+        background_music = select_background_music(music_style)
+        video_file = create_video(video_clips, images, background_music, scenes[0]['title'])
+        logger.info(f"Created video: {video_file}")
+        
+        return video_file
+    except Exception as e:
+        logger.error(f"Error in video creation: {str(e)}")
+        raise
+```
+
 ## Conclusion
 
 This optimized approach to AI video generation balances performance, resource usage, and output quality. By leveraging efficient models, intelligent indexing, and free computational resources, it's possible to create a powerful video generation tool without significant infrastructure costs. The combination of server-side processing for heavy computations and client-side rendering for final composition allows for a scalable and responsive system.
@@ -321,5 +354,6 @@ Key takeaways:
 3. Leverage free resources like Google Colab and open datasets
 4. Use distributed processing and job queues for scalability
 5. Implement progressive generation and client-side rendering for responsiveness
+6. Add robust error handling and logging for better system reliability
 
 By continuously refining each component based on specific use cases and available resources, you can create a highly efficient and practical AI video generation system.

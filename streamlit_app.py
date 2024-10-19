@@ -38,6 +38,7 @@ import pandas as pd
 import cv2
 from sentence_transformers import SentenceTransformer
 import torch
+from yt_dlp import YoutubeDL
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -87,15 +88,13 @@ SAMPLE_PROMPTS = [
     "Design a funny video about the struggles of working from home",
 ]
 
-# Replace the MUSIC_GENRES list with a dictionary of genre-specific tracks
+# Update MUSIC_TRACKS with more reliable, royalty-free sources
 MUSIC_TRACKS = {
-    "Electronic": "https://www.bensound.com/bensound-dubstep",
-    "Experimental": "https://www.bensound.com/bensound-enigmatic",
-    "Folk": "https://www.bensound.com/bensound-acousticbreeze",
-    "Hip-Hop": "https://www.bensound.com/bensound-groovyhiphop",
-    "Instrumental": "https://www.bensound.com/bensound-pianomoment",
-    "Pop": "https://www.bensound.com/bensound-ukulele",
-    "Rock": "https://www.bensound.com/bensound-extremeaction"
+    "Electronic": "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3",
+    "Experimental": "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/ccCommunity/Chad_Crouch/Arps/Chad_Crouch_-_Shipping_Lanes.mp3",
+    "Folk": "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Kai_Engel/Satin/Kai_Engel_-_07_-_Interlude.mp3",
+    "Hip-Hop": "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/ccCommunity/Kai_Engel/Sustains/Kai_Engel_-_08_-_Sentinel.mp3",
+    "Instrumental": "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Kai_Engel/Sustains/Kai_Engel_-_03_-_Contention.mp3",
 }
 
 # Set up caching for downloaded assets
@@ -168,45 +167,58 @@ def parse_storyboard(storyboard):
         return []
 
 # 3. Function to fetch video clips dynamically based on scene keywords
-def fetch_video_clips(scenes):
+@st.cache_resource
+def load_sentence_transformer():
+    return SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+
+@st.cache_resource
+def load_video_dataset():
+    return load_dataset("yttemporal1b", split="train", streaming=True)
+
+def fetch_video_clips_optimized(scenes):
     logger.info(f"Fetching video clips for {len(scenes)} scenes")
     video_clips = []
     
-    api = HfApi()
+    model = load_sentence_transformer()
+    dataset = load_video_dataset()
     
     for i, scene in enumerate(scenes):
         logger.info(f"Fetching clip for scene {i+1}: {scene['title']}")
         
-        # Expand the search query to include more relevant terms
-        keywords = scene['title'].split() + scene['description'].split() + ['video', 'clip', 'footage']
-        search_query = " OR ".join(keywords)
+        query = f"{scene['title']} {scene['description']}"
+        query_embedding = model.encode(query, convert_to_tensor=True)
         
-        try:
-            search_results = api.list_datasets(search=search_query, limit=20)
-            matching_datasets = [dataset for dataset in search_results if 'video' in dataset.id.lower()]
+        best_score = -1
+        best_video = None
+        
+        for batch in dataset.iter(batch_size=100):
+            batch_embeddings = model.encode(batch['title'], convert_to_tensor=True)
+            cos_scores = torch.nn.functional.cosine_similarity(query_embedding.unsqueeze(0), batch_embeddings)
+            max_score, max_index = torch.max(cos_scores, dim=0)
             
-            if matching_datasets:
-                chosen_dataset = random.choice(matching_datasets)
-                dataset_info = api.dataset_info(chosen_dataset.id)
+            if max_score > best_score:
+                best_score = max_score
+                best_video = batch['url'][max_index]
+            
+            if best_score > 0.8:  # Early stopping if we find a good match
+                break
+        
+        if best_video:
+            try:
+                with YoutubeDL({'format': 'best[height<=720]'}) as ydl:
+                    info = ydl.extract_info(best_video, download=False)
+                    video_url = info['url']
                 
-                if dataset_info.card_data and 'samples' in dataset_info.card_data:
-                    sample = random.choice(dataset_info.card_data['samples'])
-                    if 'video' in sample:
-                        video_path = hf_hub_download(repo_id=chosen_dataset.id, filename=sample['video'])
-                        clip = mpe.VideoFileClip(video_path).subclip(0, min(float(scene['duration']), 10))
-                        logger.info(f"Clip fetched for scene {i+1}: duration={clip.duration}s")
-                    else:
-                        raise ValueError("No video found in the sample")
-                else:
-                    raise ValueError("No samples found in the dataset")
-            else:
-                raise ValueError("No matching datasets found")
+                clip = mpe.VideoFileClip(video_url, audio=False).subclip(0, min(float(scene['duration']), 10))
+                clip = clip.resize(height=720).set_fps(30)
+                video_clips.append({'clip': clip, 'scene': scene})
+            except Exception as e:
+                logger.warning(f"Error processing video for scene {i+1}: {str(e)}")
         
-        except Exception as e:
-            logger.warning(f"Error fetching video for scene {i+1}: {str(e)}. Creating fallback clip.")
+        if len(video_clips) <= i:
+            logger.warning(f"No suitable video found for scene {i+1}. Creating fallback clip.")
             clip = create_fallback_clip(scene, duration=min(float(scene['duration']), 10))
-        
-        video_clips.append({'clip': clip, 'scene': scene})
+            video_clips.append({'clip': clip, 'scene': scene})
     
     return video_clips
 
@@ -214,33 +226,23 @@ def create_fallback_clip(scene, duration=5):
     text = scene.get('title', 'Scene')
     size = (1280, 720)
     
-    # Create a black background
     img = Image.new('RGB', size, color='black')
     draw = ImageDraw.Draw(img)
     
-    # Use a default font
-    font = ImageFont.load_default()
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
     
-    # Wrap text
-    wrapped_text = textwrap.wrap(text, width=20)
+    wrapped_text = textwrap.wrap(text, width=30)
+    y_text = (size[1] - len(wrapped_text) * 50) // 2
     
-    # Calculate text position
-    y_text = (size[1] - len(wrapped_text) * 80) // 2
-    
-    # Draw text
     for line in wrapped_text:
-        line_width, line_height = draw.textbbox((0, 0), line, font=font)[2:]
+        line_width, line_height = draw.textsize(line, font=font)
         position = ((size[0] - line_width) / 2, y_text)
         draw.text(position, line, font=font, fill='white')
         y_text += line_height + 10
     
-    # Convert PIL Image to numpy array
     img_array = np.array(img)
-    
-    # Create video clip from the image
     clip = mpe.ImageClip(img_array).set_duration(duration)
-    
-    return clip
+    return clip.set_fps(30)
 
 # 4. Function to generate voiceover with Hugging Face Inference API
 def generate_voiceover(narration_text):
@@ -947,22 +949,25 @@ def create_video_workflow(prompt, duration, music_style):
         storyboard = st.session_state.storyboard
         scenes = storyboard['scenes']
         
-        # Generate images for each scene
-        image_files = generate_images_for_scenes(scenes)
+        video_clips = fetch_video_clips_optimized(scenes)
         
-        # Create video clips from images
-        video_clips = [mpe.ImageClip(img).set_duration(scene['duration']) 
-                       for img, scene in zip(image_files, scenes)]
+        final_clips = []
+        for clip_data in video_clips:
+            clip = clip_data['clip']
+            scene = clip_data['scene']
+            
+            # Generate voiceover
+            voiceover = generate_voiceover(scene['narration'])
+            clip = clip.set_audio(voiceover)
+            
+            # Add text overlay
+            text_clip = mpe.TextClip(scene['title'], fontsize=30, color='white', font='Arial-Bold', size=clip.size)
+            text_clip = text_clip.set_position(('center', 'bottom')).set_duration(clip.duration)
+            clip = mpe.CompositeVideoClip([clip, text_clip])
+            
+            final_clips.append(clip)
         
-        # Add transitions between scenes
-        video_clips = add_transition_effects_between_scenes(video_clips)
-        
-        # Concatenate video clips
-        final_clip = mpe.concatenate_videoclips(video_clips)
-        
-        # Generate and add voiceover
-        voiceover = generate_voiceover(storyboard['title'] + ". " + ". ".join([scene['description'] for scene in scenes]))
-        final_clip = final_clip.set_audio(voiceover)
+        final_clip = mpe.concatenate_videoclips(final_clips)
         
         # Add background music
         background_music = select_background_music(music_style)
@@ -974,12 +979,9 @@ def create_video_workflow(prompt, duration, music_style):
         # Add intro and outro
         final_clip = add_intro_outro(final_clip, storyboard['title'])
         
-        # Adjust resolution based on system capacity
-        final_clip = adjust_resolution_based_on_system(final_clip)
-        
         # Write final video file
         output_path = "output_video.mp4"
-        final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+        final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', fps=30, preset='faster')
         
         st.success("✅ Video created successfully!")
         st.video(output_path)
@@ -1104,59 +1106,6 @@ def download_videos(args):
                 filepath = os.path.join(args.output_dir, filename)
                 frames = process_video(filepath, args.fps)
                 # Here you can save frames or perform further processing
-
-# Add this function after the generate_storyboard function
-def fetch_video_clips_optimized(scenes):
-    logger.info(f"Fetching video clips for {len(scenes)} scenes")
-    video_clips = []
-    
-    # Load a pre-trained sentence transformer model
-    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-    
-    # Load a video dataset (e.g., MSRVTT)
-    dataset = load_dataset("msrvtt", split="train")
-    
-    for i, scene in enumerate(scenes):
-        logger.info(f"Fetching clip for scene {i+1}: {scene['title']}")
-        
-        # Combine title and description for better context
-        query = f"{scene['title']} {scene['description']}"
-        query_embedding = model.encode(query, convert_to_tensor=True)
-        
-        # Encode all video captions in the dataset
-        caption_embeddings = model.encode(dataset['caption'], convert_to_tensor=True)
-        
-        # Compute cosine similarity
-        cos_scores = torch.nn.functional.cosine_similarity(query_embedding, caption_embeddings)
-        
-        # Get top 5 most similar videos
-        top_results = torch.topk(cos_scores, k=5)
-        
-        for score, idx in zip(top_results.values, top_results.indices):
-            video_url = dataset[idx]['video']
-            try:
-                # Download and process the video
-                response = requests.get(video_url, stream=True)
-                if response.status_code == 200:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            temp_file.write(chunk)
-                    
-                    clip = mpe.VideoFileClip(temp_file.name).subclip(0, min(float(scene['duration']), 10))
-                    video_clips.append({'clip': clip, 'scene': scene})
-                    break  # Use the first successful video
-            except Exception as e:
-                logger.warning(f"Error processing video for scene {i+1}: {str(e)}")
-        
-        if len(video_clips) <= i:
-            logger.warning(f"No suitable video found for scene {i+1}. Creating fallback clip.")
-            clip = create_fallback_clip(scene, duration=min(float(scene['duration']), 10))
-            video_clips.append({'clip': clip, 'scene': scene})
-    
-    return video_clips
-
-# Replace the existing fetch_video_clips function call in the create_video_workflow function
-video_clips = fetch_video_clips_optimized(scenes)
 
 if __name__ == "__main__":
     main()
