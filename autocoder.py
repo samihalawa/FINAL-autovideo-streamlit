@@ -69,47 +69,35 @@ def generate_requirements(packages: List[str]) -> str:
     pip_commands = [f"pip install {pkg}" for pkg in unique_packages]
     return "\n".join(pip_commands)
 
-def analyze_and_optimize(section_content: str, section_name: str, api_key: str, model: str) -> str:
+def analyze_and_optimize(section_content: str, section_name: str, coder: Coder) -> str:
     """
-    Uses OpenAI's API via Autogen to analyze and optimize a given section of the code.
+    Uses Aider to analyze and optimize a given section of the code.
     """
-    openai.api_key = api_key
     prompt = f"""
-You are an expert Python developer. Analyze the following `{section_name}` section of a Python script and optimize it. Ensure that:
+    You are an expert Python developer. Analyze the following `{section_name}` section of a Python script and optimize it. Ensure that:
 
-- No functions or essential components are removed.
-- Function names are not hallucinated or changed.
-- Logic is optimized for efficiency and clarity.
-- All inputs and outputs remain consistent.
-- If using ORMs like SQLAlchemy, schema integrity is maintained.
-- Improve error handling and add input validation where necessary.
-- Enhance code readability and add comments for complex logic.
+    - No functions or essential components are removed.
+    - Function names are not hallucinated or changed.
+    - Logic is optimized for efficiency and clarity.
+    - All inputs and outputs remain consistent.
+    - If using ORMs like SQLAlchemy, schema integrity is maintained.
+    - Improve error handling and add input validation where necessary.
+    - Enhance code readability and add comments for complex logic.
 
-Here is the `{section_name}` section:
+    Here is the `{section_name}` section:
 
-```python
-{section_content}
-```
+    ```python
+    {section_content}
+    ```
 
-Provide the optimized `{section_name}` section.
-"""
+    Provide the optimized `{section_name}` section.
+    """
 
     try:
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant for optimizing Python code."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=1500,
-            n=1,
-            stop=None,
-        )
-        optimized_section = response.choices[0].message['content'].strip()
+        optimized_section = coder.edit(section_content, prompt)
         return optimized_section
     except Exception as e:
-        st.error(f"Error during OpenAI API call: {e}")
+        st.error(f"Error during Aider optimization: {e}")
         return section_content  # Return original if error occurs
 
 def supervise_changes(original: str, optimized: str) -> bool:
@@ -225,18 +213,18 @@ def validate_api_key(api_key: str) -> bool:
     except:
         return False
 
-def optimize_section_async(section_name: str, section_content: str, api_key: str, model: str):
+def optimize_section_async(section_name: str, section_content: str, coder: Coder):
     """Asynchronously optimize a section of the script."""
-    optimized_content = analyze_and_optimize(section_content, section_name, api_key, model)
+    optimized_content = analyze_and_optimize(section_content, section_name, coder)
     return section_name, optimized_content
 
-def optimize_script(script_input: str, optimization_strategy: str) -> str:
+def optimize_script(script_input: str, optimization_strategy: str, coder: Coder) -> str:
     sections = extract_sections(script_input)
     st.session_state.script_sections = sections
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_section = {
-            executor.submit(analyze_and_optimize, content, name, st.secrets["OPENAI_API_KEY"], st.session_state.get('openai_model', 'gpt-3.5-turbo')): name
+            executor.submit(analyze_and_optimize, content, name, coder): name
             for name, content in sections.items() if name != "package_installations"
         }
         
@@ -285,16 +273,25 @@ def main():
         key="ace_editor"
     )
 
+    coder = initialize_aider()  # Add this line to initialize Aider
+
     if st.button("🚀 Optimize Script"):
         with st.spinner("Optimizing script..."):
-            optimized_script = optimize_script(script_input, optimization_strategy)
+            optimized_script = optimize_script(script_input, optimization_strategy, coder)
             st.session_state.optimized_script = optimized_script
 
     if st.session_state.optimized_script:
         st.subheader("Optimized Script Sections")
         for section, content in st.session_state.script_sections.items():
             if section != "package_installations":
-                st.session_state.script_sections[section] = st.data_editor(content, key=f"editor_{section}")
+                st.session_state.script_sections[section] = st.text_area(f"Edit {section}", content, key=f"editor_{section}")
+
+        if st.button("Save Changes"):
+            st.session_state.optimized_script = assemble_script()
+            save_final_code(st.session_state.optimized_script)
+
+        if st.button("Save Final Code"):
+            save_final_code(st.session_state.optimized_script)
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Lines of Code", len(script_input.splitlines()), 
@@ -324,3 +321,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Add this function to initialize Aider
+def initialize_aider() -> Coder:
+    io = InputOutput()
+    model = models.Model.create("gpt-4")
+    coder = Coder.create(main_model=model)
+    return coder

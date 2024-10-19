@@ -326,19 +326,14 @@ def profile_performance(script: str):
     return s.getvalue()
 
 # Add unit test generation function
-def generate_unit_tests(script: str) -> str:
+def generate_unit_tests(script: str):
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that generates unit tests for Python code."},
-                {"role": "user", "content": f"Generate unit tests for the following Python script:\n\n{script}"}
-            ]
-        )
-        return response.choices[0].message.content
+        unit_tests = aider_chat.coder.edit("", f"Generate unit tests for the following Python script:\n\n{script}")
+        return unit_tests
     except Exception as e:
-        log(f"Error generating unit tests: {str(e)}", "ERROR")
-        return f"Error generating unit tests: {str(e)}"
+        st.error(f"Error generating unit tests: {str(e)}")
+        log(f"Error: {str(e)}")
+        return None
 
 # 24. Main function
 def main():
@@ -371,3 +366,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

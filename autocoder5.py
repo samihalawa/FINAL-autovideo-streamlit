@@ -18,10 +18,12 @@ from aider.coders import Coder
 import subprocess
 import concurrent.futures
 import plotly.graph_objects as go
+from openai import OpenAI
+import json
 
 # Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
-DEFAULT_OPENAI_MODEL = "gpt-4-0613"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # Initialize session state
@@ -112,7 +114,7 @@ def analyze_and_optimize(content: str, name: str, coder: Coder) -> str:
     )
     
     try:
-        optimized_content = coder.code(prompt)
+        optimized_content = coder.edit(content, prompt)
         return optimized_content
     except Exception as e:
         st.error(f"Aider Optimization error: {str(e)}")
@@ -138,7 +140,7 @@ def optimize_sections(coder: Coder):
                 ]
             }
             
-            for future in concurrent.futures.as_completed(future_to_section):
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_section)):
                 section = future_to_section[future]
                 try:
                     optimized = future.result()
@@ -153,6 +155,9 @@ def optimize_sections(coder: Coder):
                     progress_bar.progress(current_step / total_steps)
                     st.session_state['optimization_status'][section] = "Completed"
                     log(f"{section.capitalize()} optimized.")
+                    if i == len(future_to_section) - 1:
+                        st.info(f"Completed optimization of all sections.")
+                        break
                 except Exception as e:
                     st.error(f"Error optimizing {section}: {str(e)}")
                     log(f"Error: {str(e)}")
@@ -255,6 +260,12 @@ def display_final_script():
         "text/plain"
     )
 
+# Add a function to save the final code
+def save_final_code(code: str, filename: str = "optimized_script.py"):
+    with open(filename, "w") as f:
+        f.write(code)
+    st.success(f"Saved optimized code to {filename}")
+
 # Main interface
 def main_interface(coder: Coder):
     st.title("AutocoderAI 🧑‍💻✨")
@@ -300,18 +311,18 @@ def main_interface(coder: Coder):
             st.subheader("📊 Optimized Script Sections")
             for section, content in st.session_state['optimized_sections'].items():
                 with st.expander(f"{section.capitalize()}"):
-                    st.code("\n".join(content) if isinstance(content, list) else content, language="python")
-            
-            st.subheader("🗺️ Function Dependency Map")
-            if st.session_state['script_map']:
-                plot_graph(st.session_state['script_map'])
-            
-            st.download_button(
-                label="💾 Download Optimized Script",
-                data=st.session_state['final_script'],
-                file_name="optimized_script.py",
-                mime="text/plain"
-            )
+                    if isinstance(content, dict):
+                        for subsection, subcontent in content.items():
+                            st.session_state['optimized_sections'][section][subsection] = st.text_area(f"Edit {subsection}", subcontent, key=f"editor_{section}_{subsection}")
+                    else:
+                        st.session_state['optimized_sections'][section] = st.text_area(f"Edit {section}", "\n".join(content) if isinstance(content, list) else content, key=f"editor_{section}")
+
+            if st.button("Save Changes"):
+                st.session_state['final_script'] = assemble_script()
+                save_final_code(st.session_state['final_script'])
+
+            if st.button("Save Final Code"):
+                save_final_code(st.session_state['final_script'])
 
 # Sidebar settings
 def sidebar_settings(coder: Coder):

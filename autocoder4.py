@@ -23,10 +23,11 @@ from langchain.embeddings import OpenAIEmbeddings
 import logging
 from openai import OpenAI
 import plotly.graph_objects as go
+import json
 
 # Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
-DEFAULT_OPENAI_MODEL = "gpt-4-0613"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 DEFAULT_ITERATIONS = 10
 
@@ -140,7 +141,7 @@ def supervisor_review(changes, original_code):
     return review
 
 # Main optimization function
-def optimize_and_debug(script_input):
+def optimize_and_debug(script_input, coder: Coder):
     st.write("Starting automated optimization and debugging process...")
     
     progress_bar = st.progress(0)
@@ -172,7 +173,7 @@ def optimize_and_debug(script_input):
             optimized_script = result['output']
             
             status_text.text(f"Iteration {i+1}/{state.iterations}: Applying Aider modifications")
-            optimized_script = coder.edit(optimized_script)
+            optimized_script = coder.edit(optimized_script, "Optimize and debug this entire script.")
             
             status_text.text(f"Iteration {i+1}/{state.iterations}: Supervisor review")
             review = supervisor_review(optimized_script, script_input)
@@ -200,6 +201,10 @@ def optimize_and_debug(script_input):
             if lint_result:
                 st.info("Linting results:")
                 st.code(lint_result)
+
+            if i == state.iterations - 1:
+                st.info(f"Reached the maximum number of iterations ({state.iterations}). Stopping optimization process.")
+                break
 
         progress_bar.progress(1.0)
         status_text.text("Optimization and debugging process completed.")
@@ -282,7 +287,7 @@ def main_interface():
             
             try:
                 with st.status("Optimizing and debugging script...") as status:
-                    optimized_script = optimize_and_debug(script_input)
+                    optimized_script = optimize_and_debug(script_input, coder)
                     status.update(label="Optimization complete!", state="complete", expanded=False)
                 
                 st.subheader("Optimized Script")
@@ -303,6 +308,22 @@ def main_interface():
         plot_graph(state.script_map)
     
     display_logs()
+
+    if state.final_script:
+        st.subheader("Optimized Script Sections")
+        for section, content in state.optimized_sections.items():
+            if isinstance(content, dict):
+                for subsection, subcontent in content.items():
+                    state.optimized_sections[section][subsection] = st.text_area(f"Edit {section} - {subsection}", subcontent, key=f"editor_{section}_{subsection}")
+            else:
+                state.optimized_sections[section] = st.text_area(f"Edit {section}", "\n".join(content), key=f"editor_{section}")
+
+        if st.button("Save Changes"):
+            state.final_script = assemble_script()
+            save_final_code(state.final_script)
+
+        if st.button("Save Final Code"):
+            save_final_code(state.final_script)
 
 def display_logs():
     with st.expander("Logs", expanded=False):
@@ -354,22 +375,55 @@ def run_app():
 if __name__ == "__main__":
     run_app()
 
-def analyze_and_optimize(content: str, name: str) -> str:
-    prompt = f"Optimize the following `{name}` section:\n\n```python\n{content}\n```\n\nConsider: time/space complexity, readability, PEP 8, modern Python features, error handling, type hints, imports, data structures, and caching."
-    
+def analyze_and_optimize(section_content: str, section_name: str, api_key: str, model: str) -> str:
+    """
+    Uses OpenAI's API to analyze and optimize a given section of the code.
+    """
+    prompt = f"""
+    You are an expert Python developer. Analyze the following `{section_name}` section of a Python script and optimize it. Ensure that:
+
+    - No functions or essential components are removed.
+    - Function names are not hallucinated or changed.
+    - Logic is optimized for efficiency and clarity.
+    - All inputs and outputs remain consistent.
+    - If using ORMs like SQLAlchemy, schema integrity is maintained.
+    - Improve error handling and add input validation where necessary.
+    - Enhance code readability and add comments for complex logic.
+
+    Here is the `{section_name}` section:
+
+    ```python
+    {section_content}
+    ```
+
+    Provide the optimized `{section_name}` section.
+    """
+
     try:
         response = client.chat.completions.create(
-            model=st.session_state['openai_model'],
+            model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that optimizes Python code."},
+                {"role": "system", "content": "You are a helpful assistant for optimizing Python code."},
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            temperature=0.2,
+            max_tokens=1500,
+            n=1,
+            stop=None,
+            response_format={"type": "json_object"}
         )
-        return response.choices[0].message.content
+        result = json.loads(response.choices[0].message.content)
+        optimized_section = result.get("optimized_section", section_content)
+        return optimized_section
     except Exception as e:
-        st.error(f"Optimization error: {str(e)}")
-        log(f"Error: {str(e)}")
-        return content
+        st.error(f"Error during OpenAI API call: {e}")
+        return section_content  # Return original if error occurs
+
+# Add a function to save the final code
+def save_final_code(code: str, filename: str = "optimized_script.py"):
+    with open(filename, "w") as f:
+        f.write(code)
+    st.success(f"Saved optimized code to {filename}")
 
 # Add this function near the other utility functions
 def profile_performance(script: str):
@@ -382,3 +436,5 @@ def profile_performance(script: str):
     ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
     ps.print_stats()
     return s.getvalue()
+
+

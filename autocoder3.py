@@ -25,10 +25,11 @@ import concurrent.futures
 from streamlit_folium import folium_static
 import folium
 import plotly.graph_objects as go
+import json
 
 # 1. Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
-DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_API_KEY = "gpt-4-0613", "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"
+DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_API_KEY = "gpt-4o-mini", os.environ.get("OPENAI_API_KEY", "")
 
 # 2. Initialize session state
 def init_session_state():
@@ -106,49 +107,48 @@ def set_openai_creds(key: str, model: str, endpoint: str):
         log(f"Error: {str(e)}")
 
 # 8. Analyze and optimize code section
-def analyze_and_optimize(content: str, name: str) -> str:
+def analyze_and_optimize(content: str, name: str, coder: Coder) -> str:
     prompt = f"Optimize the following `{name}` section:\n\n```python\n{content}\n```\n\nConsider: time/space complexity, readability, PEP 8, modern Python features, error handling, type hints, imports, data structures, and caching."
     
     try:
-        response = client.chat.completions.create(
-            model=st.session_state['openai_model'],
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that optimizes Python code."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content
+        optimized_content = coder.edit(content, prompt)
+        return optimized_content
     except Exception as e:
         st.error(f"Optimization error: {str(e)}")
         log(f"Error: {str(e)}")
         return content
 
 # 9. Optimize all sections
-def optimize_sections():
+def optimize_sections(coder: Coder):
     progress_bar = st.progress(0)
     total_steps = len(st.session_state['script_sections']['function_definitions']) + len(st.session_state['script_sections']['class_definitions']) + 3
     current_step = 0
 
     try:
-        for section, content in [
-            ('imports', '\n'.join(st.session_state['script_sections']['imports'])),
-            ('settings', '\n'.join(st.session_state['script_sections']['settings'])),
-            *[(f"function {func}", func_content) for func, func_content in st.session_state['script_sections']['function_definitions'].items()],
-            *[(f"class {cls}", cls_content) for cls, cls_content in st.session_state['script_sections']['class_definitions'].items()]
-        ]:
-            st.info(f"Optimizing {section}...")
-            optimized = analyze_and_optimize(content, section)
-            section_type = section.split()[0] + ('s' if section in ['imports', 'settings'] else '')
-            if section_type not in st.session_state['optimized_sections']:
-                st.session_state['optimized_sections'][section_type] = {}
-            if section in ['imports', 'settings']:
-                st.session_state['optimized_sections'][section_type] = optimized.splitlines()
-            else:
-                st.session_state['optimized_sections'][section_type][section.split()[1]] = optimized
-            current_step += 1
-            progress_bar.progress(current_step / total_steps)
-            st.session_state['optimization_status'][section] = "Completed"
-            log(f"{section.capitalize()} optimized.")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_section = {
+                executor.submit(analyze_and_optimize, content, section, coder): section
+                for section, content in [
+                    ('imports', '\n'.join(st.session_state['script_sections']['imports'])),
+                    ('settings', '\n'.join(st.session_state['script_sections']['settings'])),
+                    *[(f"function {func}", func_content) for func, func_content in st.session_state['script_sections']['function_definitions'].items()],
+                    *[(f"class {cls}", cls_content) for cls, cls_content in st.session_state['script_sections']['class_definitions'].items()]
+                ]
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_section):
+                section = future_to_section[future]
+                section_type = section.split()[0] + ('s' if section in ['imports', 'settings'] else '')
+                if section_type not in st.session_state['optimized_sections']:
+                    st.session_state['optimized_sections'][section_type] = {}
+                if section in ['imports', 'settings']:
+                    st.session_state['optimized_sections'][section_type] = content.splitlines()
+                else:
+                    st.session_state['optimized_sections'][section_type][section.split()[1]] = content
+                current_step += 1
+                progress_bar.progress(current_step / total_steps)
+                st.session_state['optimization_status'][section] = "Completed"
+                log(f"{section.capitalize()} optimized.")
     except Exception as e:
         st.error(f"Optimization error: {str(e)}")
         log(f"Error: {str(e)}")
@@ -246,7 +246,7 @@ def main_interface():
             
             with st.spinner("Analyzing and optimizing script..."):
                 st.session_state['script_sections'] = extract_sections(script_input)
-                optimize_sections()
+                optimize_sections(aider_chat.coder)
                 st.session_state['final_script'] = assemble_script()
                 st.session_state['script_map'] = gen_script_map()
             
@@ -260,6 +260,21 @@ def main_interface():
             st.info("Optimize a script to see the dependency map.")
     
     if st.session_state['final_script']:
+        st.subheader("Optimized Script Sections")
+        for section, content in st.session_state['optimized_sections'].items():
+            if isinstance(content, dict):
+                for subsection, subcontent in content.items():
+                    st.session_state['optimized_sections'][section][subsection] = st.text_area(f"Edit {section} - {subsection}", subcontent, key=f"editor_{section}_{subsection}")
+            else:
+                st.session_state['optimized_sections'][section] = st.text_area(f"Edit {section}", "\n".join(content), key=f"editor_{section}")
+
+        if st.button("Save Changes"):
+            st.session_state['final_script'] = assemble_script()
+            save_final_code(st.session_state['final_script'])
+
+        if st.button("Save Final Code"):
+            save_final_code(st.session_state['final_script'])
+
         display_collapsible_sections()
         display_side_by_side_diff()
         
@@ -537,7 +552,7 @@ def get_review_suggestions(script: str):
         return None
 
 # 29. Generate unit tests
-def gen_unit_tests(script: str):
+def gen_unit_tests(script: str, coder: Coder):
     prompt = f"""
     Generate unit tests for the following Python script:
 
@@ -547,33 +562,11 @@ def gen_unit_tests(script: str):
 
     Include: test cases for each function/method, edge cases, mocking, pytest fixtures, and clear test names/descriptions.
     Provide executable Python code.
-
-    Response format:
-    {{
-        "unit_tests": "string"
-    }}
-
-    Schema:
-    {{
-        "type": "object",
-        "properties": {{
-            "unit_tests": {{"type": "string"}}
-        }},
-        "required": ["unit_tests"]
-    }}
     """
     
     try:
-        response = openai.ChatCompletion.create(
-            model=st.session_state['openai_model'],
-            messages=[
-                {"role": "system", "content": "You are an expert in Python testing, specializing in creating comprehensive and robust unit tests."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"}
-        )
-        result = json.loads(response.choices[0].message.content)
-        return result['unit_tests']
+        unit_tests = coder.edit("", prompt)  # Start with an empty string and let Aider generate the tests
+        return unit_tests
     except Exception as e:
         st.error(f"Error generating unit tests: {str(e)}")
         log(f"Error: {str(e)}")
@@ -602,14 +595,17 @@ def optimize_with_aider(script: str):
         log(f"Error: {str(e)}")
         return script
 
+# Add a function to save the final code
+def save_final_code(code: str, filename: str = "optimized_script.py"):
+    with open(filename, "w") as f:
+        f.write(code)
+    st.success(f"Saved optimized code to {filename}")
+
 # Initialize aider components
 io = InputOutput()
 model = models.Model.create("gpt-4")  # Use GPT-4 as the default model
 coder = Coder.create(main_model=model)
 aider_chat = chat.Chat(io=io, coder=coder)
-
-# Initialize the OpenAI client
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # Run the app
 if __name__ == "__main__":
