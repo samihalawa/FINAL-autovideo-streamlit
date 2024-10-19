@@ -29,15 +29,6 @@ from scenedetect import detect, ContentDetector
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
 import re
-import argparse
-import os
-from concurrent.futures import ThreadPoolExecutor
-import requests
-from tqdm import tqdm
-import pandas as pd
-import cv2
-from sentence_transformers import SentenceTransformer
-import torch
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -59,8 +50,8 @@ except Exception:
     logger.info("Logging in to Hugging Face")
     login(token=hf_token, add_to_git_credential=False)
 
-# Update OpenAI client initialization
-client = OpenAI()
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Theme customization
 if 'theme' not in st.session_state:
@@ -168,7 +159,7 @@ def parse_storyboard(storyboard):
         return []
 
 # 3. Function to fetch video clips dynamically based on scene keywords
-def fetch_video_clips(scenes):
+def fetch_video_clips(scenes, max_retries=3):
     logger.info(f"Fetching video clips for {len(scenes)} scenes")
     video_clips = []
     
@@ -177,34 +168,39 @@ def fetch_video_clips(scenes):
     for i, scene in enumerate(scenes):
         logger.info(f"Fetching clip for scene {i+1}: {scene['title']}")
         
-        # Expand the search query to include more relevant terms
-        keywords = scene['title'].split() + scene['description'].split() + ['video', 'clip', 'footage']
-        search_query = " OR ".join(keywords)
-        
-        try:
-            search_results = api.list_datasets(search=search_query, limit=20)
-            matching_datasets = [dataset for dataset in search_results if 'video' in dataset.id.lower()]
-            
-            if matching_datasets:
-                chosen_dataset = random.choice(matching_datasets)
-                dataset_info = api.dataset_info(chosen_dataset.id)
+        for attempt in range(max_retries):
+            try:
+                # Expand the search query to include more relevant terms
+                keywords = scene['title'].split() + scene['description'].split() + ['video', 'clip', 'footage']
+                search_query = " OR ".join(keywords)
                 
-                if dataset_info.card_data and 'samples' in dataset_info.card_data:
-                    sample = random.choice(dataset_info.card_data['samples'])
-                    if 'video' in sample:
-                        video_path = hf_hub_download(repo_id=chosen_dataset.id, filename=sample['video'])
-                        clip = mpe.VideoFileClip(video_path).subclip(0, min(float(scene['duration']), 10))
-                        logger.info(f"Clip fetched for scene {i+1}: duration={clip.duration}s")
+                search_results = api.list_datasets(search=search_query, limit=20)  # Increase the limit
+                matching_datasets = [dataset for dataset in search_results if 'video' in dataset.id.lower()]
+                
+                if matching_datasets:
+                    chosen_dataset = random.choice(matching_datasets)
+                    dataset_info = api.dataset_info(chosen_dataset.id)
+                    
+                    if dataset_info.card_data and 'samples' in dataset_info.card_data:
+                        sample = random.choice(dataset_info.card_data['samples'])
+                        if 'video' in sample:
+                            video_path = hf_hub_download(repo_id=chosen_dataset.id, filename=sample['video'])
+                            clip = mpe.VideoFileClip(video_path).subclip(0, min(float(scene['duration']), 10))  # Limit to 10 seconds max
+                            logger.info(f"Clip fetched for scene {i+1}: duration={clip.duration}s")
+                        else:
+                            raise ValueError("No video found in the sample")
                     else:
-                        raise ValueError("No video found in the sample")
+                        raise ValueError("No samples found in the dataset")
                 else:
-                    raise ValueError("No samples found in the dataset")
-            else:
-                raise ValueError("No matching datasets found")
-        
-        except Exception as e:
-            logger.warning(f"Error fetching video for scene {i+1}: {str(e)}. Creating fallback clip.")
-            clip = create_fallback_clip(scene, duration=min(float(scene['duration']), 10))
+                    raise ValueError("No matching datasets found")
+                
+                if clip:
+                    break  # Successfully fetched a clip, exit the retry loop
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    logger.warning(f"All attempts failed. Creating fallback clip for scene {i+1}.")
+                    clip = create_fallback_clip(scene, duration=min(float(scene['duration']), 10))
         
         video_clips.append({'clip': clip, 'scene': scene})
     
@@ -930,64 +926,135 @@ def predict_processing_issues(video_clips, system_resources):
 def generate_script(prompt, duration):
     try:
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a professional video scriptwriter."},
-                {"role": "user", "content": f"Create a storyboard for a {duration}-second video about: {prompt}. Include a title and 5-8 scenes with descriptions."}
+                {"role": "system", "content": "You are an expert video scriptwriter. Create a JSON script for a video based on the given prompt and duration. Use the following schema:"},
+                {"role": "user", "content": f"""
+                Create a script for a {duration} second video about: {prompt}. 
+                Return the script as a JSON object with the following structure:
+                {{
+                    "title": "Overall video title",
+                    "scenes": [
+                        {{
+                            "scene_number": 1,
+                            "title": "Scene title",
+                            "description": "Detailed scene description",
+                            "narration": "Narration text for the scene",
+                            "duration": "Duration in seconds"
+                        }}
+                    ]
+                }}
+                Include 3-5 scenes in total.
+                """}
             ],
-            temperature=0.7
+            max_tokens=1000,
+            response_format={"type": "json_object"}
         )
-        return json.loads(response.choices[0].message.content)
+        script = json.loads(response.choices[0].message.content)
+        logger.info(f"Generated script: {script}")
+        return script
     except Exception as e:
         logger.error(f"Error generating script: {str(e)}")
         return None
 
+def fetch_video_clips(scenes):
+    logger.info(f"Fetching video clips for {len(scenes)} scenes")
+    video_clips = []
+    
+    api = HfApi()
+    
+    for i, scene in enumerate(scenes):
+        logger.info(f"Fetching clip for scene {i+1}: {scene['title']}")
+        
+        # Expand the search query to include more relevant terms
+        keywords = scene['title'].split() + scene['description'].split() + ['video', 'clip', 'footage']
+        search_query = " OR ".join(keywords)
+        
+        try:
+            search_results = api.list_datasets(search=search_query, limit=20)  # Increase the limit
+            matching_datasets = [dataset for dataset in search_results if 'video' in dataset.id.lower()]
+            
+            if matching_datasets:
+                chosen_dataset = random.choice(matching_datasets)
+                dataset_info = api.dataset_info(chosen_dataset.id)
+                
+                if dataset_info.card_data and 'samples' in dataset_info.card_data:
+                    sample = random.choice(dataset_info.card_data['samples'])
+                    if 'video' in sample:
+                        video_path = hf_hub_download(repo_id=chosen_dataset.id, filename=sample['video'])
+                        clip = mpe.VideoFileClip(video_path).subclip(0, min(float(scene['duration']), 10))  # Limit to 10 seconds max
+                        logger.info(f"Clip fetched for scene {i+1}: duration={clip.duration}s")
+                    else:
+                        raise ValueError("No video found in the sample")
+                else:
+                    raise ValueError("No samples found in the dataset")
+            else:
+                raise ValueError("No matching datasets found")
+        
+        except Exception as e:
+            logger.warning(f"Error fetching video for scene {i+1}: {str(e)}. Creating fallback clip.")
+            clip = create_fallback_clip(scene, duration=min(float(scene['duration']), 10))
+        
+        video_clips.append({'clip': clip, 'scene': scene})
+    
+    return video_clips
+
 def create_video_workflow(prompt, duration, music_style):
     try:
-        storyboard = st.session_state.storyboard
-        scenes = storyboard['scenes']
-        
-        # Generate images for each scene
-        image_files = generate_images_for_scenes(scenes)
-        
-        # Create video clips from images
-        video_clips = [mpe.ImageClip(img).set_duration(scene['duration']) 
-                       for img, scene in zip(image_files, scenes)]
-        
-        # Add transitions between scenes
-        video_clips = add_transition_effects_between_scenes(video_clips)
-        
-        # Concatenate video clips
-        final_clip = mpe.concatenate_videoclips(video_clips)
-        
-        # Generate and add voiceover
-        voiceover = generate_voiceover(storyboard['title'] + ". " + ". ".join([scene['description'] for scene in scenes]))
-        final_clip = final_clip.set_audio(voiceover)
-        
-        # Add background music
-        background_music = select_background_music(music_style)
-        if background_music:
-            background_audio = mpe.AudioFileClip(background_music).volumex(0.1).set_duration(final_clip.duration)
-            final_audio = mpe.CompositeAudioClip([final_clip.audio, background_audio])
-            final_clip = final_clip.set_audio(final_audio)
-        
-        # Add intro and outro
-        final_clip = add_intro_outro(final_clip, storyboard['title'])
-        
-        # Adjust resolution based on system capacity
-        final_clip = adjust_resolution_based_on_system(final_clip)
-        
-        # Write final video file
-        output_path = "output_video.mp4"
-        final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
-        
-        st.success("✅ Video created successfully!")
-        st.video(output_path)
-        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        logger.info("Starting video creation workflow")
+        status_text.text("Generating script...")
+        script = generate_script(prompt, duration)
+        if not script:
+            raise ValueError("Failed to generate script")
+        logger.info("Script generated successfully")
+        progress_bar.progress(20)
+
+        scenes = script['scenes']
+        if not scenes:
+            logger.error(f"No scenes found in the script. Script content: {script}")
+            raise ValueError("No scenes found in the script")
+        logger.info(f"Successfully extracted {len(scenes)} scenes")
+        progress_bar.progress(30)
+
+        status_text.text("Fetching video clips...")
+        video_clips = fetch_video_clips(scenes)
+        if not video_clips:
+            raise ValueError("Failed to fetch video clips")
+        progress_bar.progress(50)
+
+        status_text.text("Generating voiceovers...")
+        for clip_data in video_clips:
+            clip_data['narration'] = generate_voiceover(clip_data['scene']['narration'])
+        progress_bar.progress(70)
+
+        status_text.text("Selecting background music...")
+        background_music_file = select_background_music(music_style)
+        progress_bar.progress(80)
+
+        status_text.text("Creating your video...")
+        video_file = create_video(video_clips, background_music_file, script['title'])
+        progress_bar.progress(90)
+
+        if video_file and os.path.exists(video_file):
+            status_text.text("Finalizing...")
+            progress_bar.progress(100)
+            logger.info("Video creation successful")
+            st.success("🎉 Video created successfully!")
+            st.video(video_file)
+            with open(video_file, 'rb') as vf:
+                st.download_button(label="📥 Download Video", data=vf, file_name="AutovideoAI_creation.mp4")
+        else:
+            logger.error("Failed to create the video")
+            st.error("❌ Failed to create the video. Please try again.")
     except Exception as e:
-        st.error(f"An error occurred during video creation: {str(e)}")
+        logger.error(f"An error occurred during video creation: {str(e)}")
+        st.error(f"An error occurred: {str(e)}")
     finally:
-        cleanup_temp_files()
+        status_text.empty()
+        progress_bar.empty()
 
 def main():
     st.markdown("<h1 style='text-align: center; color: #4A90E2;'>AutovideoAI</h1>", unsafe_allow_html=True)
@@ -1012,7 +1079,7 @@ def main():
         for sample_prompt in SAMPLE_PROMPTS:
             if st.button(f"📌 {sample_prompt}", key=f"btn_{sample_prompt}"):
                 st.session_state.prompt = sample_prompt
-                st.rerun()
+                st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
 
     st.subheader("2️⃣ Customize Your Video")
     col1, col2, col3 = st.columns(3)
@@ -1059,104 +1126,6 @@ def color_gradient(size, p1, p2, color1, color2):
     gradient = x * (p2[0] - p1[0]) + y * (p2[1] - p1[1])
     gradient = np.clip(gradient, 0, 1)
     return np.array(color1) * (1 - gradient[:, :, None]) + np.array(color2) * gradient[:, :, None]
-
-def download_video(row, output_dir):
-    try:
-        response = requests.get(row['video_url'], stream=True)
-        if response.status_code == 200:
-            filename = f"{row['videoid']}.mp4"
-            filepath = os.path.join(output_dir, filename)
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
-            return True
-    except Exception as e:
-        print(f"Error downloading {row['videoid']}: {str(e)}")
-    return False
-
-def process_video(filepath, fps=1):
-    cap = cv2.VideoCapture(filepath)
-    frames = []
-    count = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if count % int(cap.get(cv2.CAP_PROP_FPS) / fps) == 0:
-            frames.append(frame)
-        count += 1
-    cap.release()
-    return frames
-
-def download_videos(args):
-    os.makedirs(args.output_dir, exist_ok=True)
-    df = pd.read_csv(args.input_csv)
-
-    with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
-        results = list(tqdm(executor.map(lambda row: download_video(row, args.output_dir), df.itertuples(index=False)), total=len(df)))
-
-    print(f"Successfully downloaded {sum(results)} videos out of {len(df)}")
-
-    if args.process:
-        for filename in os.listdir(args.output_dir):
-            if filename.endswith('.mp4'):
-                filepath = os.path.join(args.output_dir, filename)
-                frames = process_video(filepath, args.fps)
-                # Here you can save frames or perform further processing
-
-# Add this function after the generate_storyboard function
-def fetch_video_clips_optimized(scenes):
-    logger.info(f"Fetching video clips for {len(scenes)} scenes")
-    video_clips = []
-    
-    # Load a pre-trained sentence transformer model
-    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-    
-    # Load a video dataset (e.g., MSRVTT)
-    dataset = load_dataset("msrvtt", split="train")
-    
-    for i, scene in enumerate(scenes):
-        logger.info(f"Fetching clip for scene {i+1}: {scene['title']}")
-        
-        # Combine title and description for better context
-        query = f"{scene['title']} {scene['description']}"
-        query_embedding = model.encode(query, convert_to_tensor=True)
-        
-        # Encode all video captions in the dataset
-        caption_embeddings = model.encode(dataset['caption'], convert_to_tensor=True)
-        
-        # Compute cosine similarity
-        cos_scores = torch.nn.functional.cosine_similarity(query_embedding, caption_embeddings)
-        
-        # Get top 5 most similar videos
-        top_results = torch.topk(cos_scores, k=5)
-        
-        for score, idx in zip(top_results.values, top_results.indices):
-            video_url = dataset[idx]['video']
-            try:
-                # Download and process the video
-                response = requests.get(video_url, stream=True)
-                if response.status_code == 200:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            temp_file.write(chunk)
-                    
-                    clip = mpe.VideoFileClip(temp_file.name).subclip(0, min(float(scene['duration']), 10))
-                    video_clips.append({'clip': clip, 'scene': scene})
-                    break  # Use the first successful video
-            except Exception as e:
-                logger.warning(f"Error processing video for scene {i+1}: {str(e)}")
-        
-        if len(video_clips) <= i:
-            logger.warning(f"No suitable video found for scene {i+1}. Creating fallback clip.")
-            clip = create_fallback_clip(scene, duration=min(float(scene['duration']), 10))
-            video_clips.append({'clip': clip, 'scene': scene})
-    
-    return video_clips
-
-# Replace the existing fetch_video_clips function call in the create_video_workflow function
-video_clips = fetch_video_clips_optimized(scenes)
 
 if __name__ == "__main__":
     main()

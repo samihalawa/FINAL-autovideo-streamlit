@@ -1,0 +1,30 @@
+{
+  "name": "autovideo-ai",
+  "version": "1.0.0",
+  "description": "An AI-powered video generation tool",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "setup": "mkdir -p assets/music output temp"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "axios": "^1.6.5",
+    "canvas": "^2.11.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "fluent-ffmpeg": "^2.1.2",
+    "openai": "^4.0.0",
+    "uuid": "^9.0.1",
+    "winston": "^3.11.0",
+    "lru-cache": "^10.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
