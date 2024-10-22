@@ -11,3 +11,12 @@ tenacity
 huggingface_hub
 python-dotenv
 requests
+aider-chat
+langchain
+streamlit
+streamlit-ace
+streamlit-modal
+streamlit-sortables
+pyvis
+networkx
+pydot

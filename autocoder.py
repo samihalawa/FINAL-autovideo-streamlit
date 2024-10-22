@@ -51,7 +51,7 @@ def extract_sections(script_content: str) -> Dict[str, Any]:
             sections["settings"] += ast.unparse(node) + "\n"
         elif isinstance(node, ast.FunctionDef):
             sections["function_definitions"][node.name] = ast.unparse(node)
-        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+        elif isinstance(node,git ast.Expr) and isinstance(node.value, ast.Call):
             if isinstance(node.value.func, ast.Attribute):
                 if node.value.func.attr in ["system", "check_call", "run"]:
                     for arg in node.value.args:
