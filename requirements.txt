@@ -14,3 +14,6 @@ python-dotenv
 numpy
 Pillow
 PyGithub
+streamlit-option-menu
+pandas
+scikit-learn

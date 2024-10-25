@@ -1,3 +1,6 @@
+# Add at the top with other imports
+import pkg_resources
+from pkg_resources import parse_requirements
 import streamlit as st
 import importlib
 import os
