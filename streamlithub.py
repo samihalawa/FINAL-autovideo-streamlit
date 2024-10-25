@@ -80,55 +80,64 @@ def run_app_safely(module, app_name):
 def create_new_app():
     st.subheader("Create New App")
     
-    templates = {
-        "Basic": """import streamlit as st\n\ndef main():\n    st.title("New App")\n\nif __name__ == "__main__":\n    main()""",
-        "Data Analysis": """import streamlit as st\nimport pandas as pd\nimport plotly.express as px\n\ndef main():\n    st.title("Data Analysis App")\n\nif __name__ == "__main__":\n    main()""",
-        "Machine Learning": """import streamlit as st\nimport pandas as pd\nfrom sklearn.model_selection import train_test_split\n\ndef main():\n    st.title("ML App")\n\nif __name__ == "__main__":\n    main()"""
-    }
-    
-    col1, col2 = st.columns([2,1])
+    # Add import from GitHub
+    col1, col2 = st.columns(2)
     with col1:
+        st.markdown("### Create New")
+        create_method = st.radio("Creation Method", ["Template", "Import from GitHub"])
+    
+    if create_method == "Template":
+        templates = {
+            "Basic": """import streamlit as st\n\ndef main():\n    st.title("New App")\n\nif __name__ == "__main__":\n    main()""",
+            "Data Analysis": """import streamlit as st\nimport pandas as pd\nimport plotly.express as px\n\ndef main():\n    st.title("Data Analysis App")\n\nif __name__ == "__main__":\n    main()""",
+            "Machine Learning": """import streamlit as st\nimport pandas as pd\nfrom sklearn.model_selection import train_test_split\n\ndef main():\n    st.title("ML App")\n\nif __name__ == "__main__":\n    main()"""
+        }
+        
         app_name = st.text_input("App Name")
         template = st.selectbox("Template", list(templates.keys()))
         
-    with col2:
-        st.markdown("### Quick Settings")
-        add_requirements = st.checkbox("Add to requirements.txt")
-        create_test_file = st.checkbox("Create test file")
+        # Template preview and customization
+        st.session_state.current_template = templates[template]
+        handle_template_customization()
         
-    code = st_ace(
-        value=templates[template],
-        language="python",
-        theme="monokai",
-        height=300
-    )
+        if st.button("Create App"):
+            if not app_name:
+                st.error("Please enter an app name")
+                return
+                
+            file_name = f"{app_name.lower().replace(' ', '_')}.py"
+            if os.path.exists(file_name):
+                st.error(f"App {file_name} already exists")
+                return
+                
+            try:
+                with open(file_name, 'w') as f:
+                    f.write(st.session_state.current_template)
+                st.success(f"Created {file_name} successfully!")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Error creating app: {str(e)}")
     
-    if st.button("Create App"):
-        if not app_name:
-            st.error("Please enter an app name")
-            return
-            
-        file_name = f"{app_name.lower().replace(' ', '_')}.py"
-        if os.path.exists(file_name):
-            st.error(f"App {file_name} already exists")
+    else:  # Import from GitHub
+        if 'gh_token' not in st.session_state:
+            st.error("Please set GitHub token in settings first")
             return
             
         try:
-            with open(file_name, 'w') as f:
-                f.write(code)
-                
-            if create_test_file:
-                test_file = f"test_{file_name}"
-                with open(test_file, 'w') as f:
-                    f.write(f"""import unittest\nimport {app_name.lower().replace(' ', '_')}\n\nclass Test{app_name.replace(' ', '')}(unittest.TestCase):\n    def test_main(self):\n        pass""")
-                    
-            if add_requirements:
-                update_requirements(template)
-                
-            st.success(f"Created {file_name} successfully!")
-            st.experimental_rerun()
+            g = Github(st.session_state.gh_token)
+            repo_url = st.text_input("GitHub Repository URL")
+            if repo_url and st.button("Import"):
+                repo_name = repo_url.split('/')[-2:]
+                repo = g.get_repo('/'.join(repo_name))
+                contents = repo.get_contents("")
+                for content in contents:
+                    if content.path.endswith('.py'):
+                        with open(content.path, 'w') as f:
+                            f.write(content.decoded_content.decode())
+                st.success("Successfully imported files")
+                st.experimental_rerun()
         except Exception as e:
-            st.error(f"Error creating app: {str(e)}")
+            st.error(f"Error importing from GitHub: {str(e)}")
 
 def manage_dependencies():
     st.subheader("Dependency Management")
@@ -169,37 +178,52 @@ def github_integration():
         user = g.get_user()
         repos = [repo.full_name for repo in user.get_repos()]
         
-        repo_name = st.selectbox("Select Repository", repos)
-        files_to_sync = st.multiselect(
-            "Files to Sync",
-            [f for f in os.listdir() if f.endswith('.py')]
-        )
+        col1, col2 = st.columns(2)
+        with col1:
+            repo_name = st.selectbox("Select Repository", repos)
+            if repo_name:
+                repo = g.get_repo(repo_name)
+                git_workflow(repo)
         
-        commit_msg = st.text_input("Commit Message", "Update from Streamlit Hub")
-        
-        if st.button("Sync with GitHub"):
-            repo = g.get_repo(repo_name)
-            for file in files_to_sync:
+        with col2:
+            st.markdown("### Files to Sync")
+            files_to_sync = st.multiselect(
+                "Select Files",
+                [f for f in os.listdir() if f.endswith('.py')]
+            )
+            
+            commit_msg = st.text_input("Commit Message", "Update from Streamlit Hub")
+            
+            if st.button("Sync with GitHub"):
                 try:
-                    with open(file, 'r') as f:
-                        content = f.read()
-                    try:
-                        contents = repo.get_contents(file)
-                        repo.update_file(
-                            contents.path,
-                            commit_msg,
-                            content,
-                            contents.sha
-                        )
-                    except:
-                        repo.create_file(
-                            file,
-                            commit_msg,
-                            content
-                        )
-                    st.success(f"Synced {file}")
+                    # First pull
+                    st.info("Pulling latest changes...")
+                    git_workflow(repo)
+                    
+                    # Then push
+                    for file in files_to_sync:
+                        try:
+                            with open(file, 'r') as f:
+                                content = f.read()
+                            try:
+                                contents = repo.get_contents(file)
+                                repo.update_file(
+                                    contents.path,
+                                    commit_msg,
+                                    content,
+                                    contents.sha
+                                )
+                            except:
+                                repo.create_file(
+                                    file,
+                                    commit_msg,
+                                    content
+                                )
+                            st.success(f"Synced {file}")
+                        except Exception as e:
+                            st.error(f"Error syncing {file}: {str(e)}")
                 except Exception as e:
-                    st.error(f"Error syncing {file}: {str(e)}")
+                    st.error(f"Sync error: {str(e)}")
                     
     except Exception as e:
         st.error(f"GitHub Error: {str(e)}")
@@ -293,12 +317,12 @@ def clone_app(original_path, new_name):
 def validate_requirements(requirements_text):
     """Validate requirements format and availability"""
     try:
-        import pkg_resources
+        from pkg_resources import parse_requirements  # More specific import
         requirements = [r.strip() for r in requirements_text.split('\n') if r.strip()]
         invalid = []
         for req in requirements:
             try:
-                pkg_resources.require(req)
+                next(parse_requirements(req))
             except:
                 invalid.append(req)
         return not invalid, invalid
@@ -307,10 +331,81 @@ def validate_requirements(requirements_text):
 
 def show_diff(original, modified):
     """Show differences between two versions of code"""
-    import difflib
+    import difflib  # built-in module
     d = difflib.HtmlDiff()
     diff_html = d.make_file(original.splitlines(), modified.splitlines())
-    st.components.v1.html(diff_html, height=500, scrolling=True)
+    st.markdown(diff_html, unsafe_allow_html=True)  # Use markdown instead of components.v1.html
+
+def git_workflow(repo, branch='main'):
+    """Enhanced GitHub workflow with branch support and history"""
+    branches = [b.name for b in repo.get_branches()]
+    selected_branch = st.selectbox("Select Branch", branches, index=branches.index('main') if 'main' in branches else 0)
+    
+    # Pull latest changes
+    if st.button("Pull Latest Changes"):
+        try:
+            contents = repo.get_contents("")
+            for content in contents:
+                if content.path.endswith('.py'):
+                    file_content = content.decoded_content.decode()
+                    with open(content.path, 'w') as f:
+                        f.write(file_content)
+            st.success("Successfully pulled latest changes")
+        except Exception as e:
+            st.error(f"Error pulling changes: {str(e)}")
+
+    # Show commit history
+    with st.expander("Commit History"):
+        commits = repo.get_commits()
+        for commit in list(commits)[:5]:
+            st.markdown(f"**{commit.commit.message}**")
+            st.markdown(f"Author: {commit.commit.author.name}")
+            st.markdown(f"Date: {commit.commit.author.date}")
+            st.markdown("---")
+
+def handle_template_customization():
+    """Handle template customization and preview"""
+    st.subheader("Template Customization")
+    
+    template = st.session_state.get('current_template', '')  # Changed from {} to ''
+    if not template:
+        return
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### Edit Template")
+        modified_template = st_ace(
+            value=template,
+            language="python",
+            theme="monokai",
+            height=300
+        )
+        st.session_state.current_template = modified_template  # Save changes
+    
+    with col2:
+        st.markdown("### Preview")
+        with st.expander("Template Preview", expanded=True):
+            st.code(modified_template, language="python")
+
+def version_control():
+    """Basic version control for app editing"""
+    if 'version_history' not in st.session_state:
+        st.session_state.version_history = []
+    if 'current_code' not in st.session_state:
+        st.session_state.current_code = ''
+    
+    current_version = len(st.session_state.version_history)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Undo") and current_version > 0:
+            st.session_state.version_history.pop()
+            return st.session_state.version_history[-1] if st.session_state.version_history else ''
+    
+    with col2:
+        if st.button("Save Version"):
+            st.session_state.version_history.append(st.session_state.current_code)
+            return None
 
 def main():
     if 'current_app' not in st.session_state:
