@@ -1,0 +1,7 @@
+{
+    "Main App": "streamlit_app.py",
+    "AutoCoder": "autocoder.py",
+    "AutoCoder 4": "autocoder4.py",
+    "AutoCoder 6": "autocoder6.py",
+    "Massive App": "streamlit_app_massiv.py"
+}

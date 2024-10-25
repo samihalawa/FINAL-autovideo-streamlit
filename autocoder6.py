@@ -28,6 +28,14 @@ from pathlib import Path
 import subprocess
 import streamlit_authenticator as stauth
 from pyvis.network import Network
+from autocoder import State, optimize_script, validate_api_key, save_final_code, generate_optimization_suggestion
+from aider import chat
+import time
+import plotly.graph_objects as go
+from streamlit_agraph import agraph, Node, Edge, Config
+from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import openai
 
 # Streamlit Page Configuration
 st.set_page_config(
@@ -384,30 +392,30 @@ class ProfilerAgent:
         ps.print_stats(10)
         return s.getvalue()
 
-class EnhancedDependencyCheckerAgent:
-    def check_dependencies(self, code_blocks: dict) -> set:
-        declared_imports = {}
-        used_names = set()
-
-        for block_content in code_blocks.values():
+class DependencyCheckerAgent:
+    def check_dependencies(self, code_blocks: Dict[str, str]) -> Dict[str, List[str]]:
+        """Analyzes code blocks for unused imports and dependencies."""
+        unused_imports = {}
+        for block_name, content in code_blocks.items():
             try:
-                tree = ast.parse(block_content)
+                tree = ast.parse(content)
+                imports = set()
+                used_names = set()
+                
                 for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
-                            declared_imports[alias.asname or alias.name] = alias.name
-                    elif isinstance(node, ast.ImportFrom):
-                        module = node.module
-                        for alias in node.names:
-                            full_name = f"{module}.{alias.name}" if module else alias.name
-                            declared_imports[alias.asname or alias.name] = full_name
+                    if isinstance(node, (ast.Import, ast.ImportFrom)):
+                        for name in node.names:
+                            imports.add(name.name)
                     elif isinstance(node, ast.Name):
                         used_names.add(node.id)
-            except SyntaxError as e:
-                st.error(f"Syntax error during dependency check: {e}")
-                return set()
-
-        unused_imports = {alias for alias in declared_imports if alias not in used_names}
+                
+                unused = imports - used_names
+                if unused:
+                    unused_imports[block_name] = list(unused)
+                    
+            except Exception as e:
+                log_error(f"Dependency check failed for {block_name}: {str(e)}")
+                
         return unused_imports
 
 @st.cache_resource
@@ -416,7 +424,7 @@ def get_agents():
     editor_agent = EditorAgent()
     verifier_agent = VerifierAgent()
     profiler_agent = ProfilerAgent()
-    dependency_checker_agent = EnhancedDependencyCheckerAgent()
+    dependency_checker_agent = DependencyCheckerAgent()
     supervisor_agent = SupervisorAgent(planner_agent, editor_agent, verifier_agent, profiler_agent, dependency_checker_agent)
     return supervisor_agent
 
@@ -427,25 +435,26 @@ supervisor_agent = get_agents()
 # ==========================
 
 def authenticate_user():
-    users = {
-        "usernames": {
-            "johndoe": {"name": "John Doe", "password": stauth.Hasher(['password123']).generate()[0]},
-            "janedoe": {"name": "Jane Doe", "password": stauth.Hasher(['securepass']).generate()[0]}
-        }
-    }
+    """Handle user authentication."""
+    if 'authentication_status' not in st.session_state:
+        st.session_state['authentication_status'] = False
 
-    authenticator = stauth.Authenticate(users, 'autocoder_auth', 'abcdef', cookie_expiry_days=30)
-    name, authentication_status, username = authenticator.login('Login', 'main')
-
-    if authentication_status:
-        authenticator.logout('Logout', 'sidebar')
-        st.sidebar.write(f'Welcome *{name}*')
-    elif authentication_status == False:
-        st.error('Username/password is incorrect')
-    elif authentication_status == None:
-        st.warning('Please enter your username and password')
+    if not st.session_state['authentication_status']:
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        
+        if st.button("Login"):
+            # Simple authentication for demo
+            if username == "admin" and password == "admin":
+                st.session_state['authentication_status'] = True
+                st.session_state['username'] = username
+                return True, username
+            else:
+                st.error("Invalid credentials")
+                return False, None
+        return False, None
     
-    return authentication_status, username
+    return True, st.session_state.get('username')
 
 def render_settings():
     st.title("Settings")
@@ -693,6 +702,138 @@ def sync_code_blocks(shared_state: dict):
 def update_shared_state():
     for k in shared_state.keys():
         shared_state[k] = getattr(state, k)
+
+def save_session_state():
+    """Save current session state."""
+    if 'username' in st.session_state:
+        session_data = {
+            'script_sections': st.session_state.get('script_sections', {}),
+            'optimized_sections': st.session_state.get('optimized_sections', {}),
+            'final_script': st.session_state.get('final_script', ''),
+            'optimization_status': st.session_state.get('optimization_status', {})
+        }
+        
+        with open(f"{st.session_state['username']}_session.pkl", 'wb') as f:
+            pickle.dump(session_data, f)
+
+def extract_sections(script: str) -> Dict[str, Any]:
+    try:
+        tree = ast.parse(script)
+    except SyntaxError as e:
+        log_error(f"Syntax Error: {e}")
+        return {}
+    
+    sections = {
+        "imports": [],
+        "settings": "",
+        "function_definitions": {},
+        "class_definitions": {},
+        "global_code": []
+    }
+    
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            sections["imports"].append(ast.unparse(node))
+        elif isinstance(node, ast.FunctionDef):
+            sections["function_definitions"][node.name] = ast.unparse(node)
+        elif isinstance(node, ast.ClassDef):
+            sections["class_definitions"][node.name] = ast.unparse(node)
+        elif isinstance(node, ast.Assign):
+            sections["settings"] += ast.unparse(node) + "\n"
+        elif isinstance(node, ast.Expr):
+            sections["global_code"].append(ast.unparse(node))
+    
+    return sections
+
+def optimize_section(self, name: str, content: str) -> str:
+    """Optimize a single section with error handling."""
+    try:
+        if not content.strip():
+            return content
+                
+        prompt = self.generate_prompt(name, content)
+        response = openai.ChatCompletion.create(
+            model=self.state.settings["model"],
+            messages=[
+                {"role": "system", "content": "You are a Python optimization expert."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        optimized = response.choices[0].message.content.strip()
+        if not self.validate_section(optimized):
+            return content
+                
+        return optimized
+    except Exception as e:
+        self.log_error(f"optimization_{name}", e)
+        return content
+
+class OptimizationWorkflow:
+    def __init__(self, state: State):
+        self.state = state
+        self.history = []
+        
+    def execute(self, script: str) -> str:
+        """Execute the complete optimization workflow."""
+        try:
+            # Extract and validate
+            sections = extract_sections(script)
+            if not sections:
+                raise ValueError("No valid code sections found")
+            
+            # Optimize sections
+            optimized_sections = {}
+            with ThreadPoolExecutor() as executor:
+                futures = {
+                    executor.submit(self.optimize_section, name, content): name
+                    for name, content in sections.items()
+                }
+                
+                for future in as_completed(futures):
+                    name = futures[future]
+                    try:
+                        optimized = future.result()
+                        optimized_sections[name] = optimized
+                        self.log_success(name)
+                    except Exception as e:
+                        self.log_error(name, e)
+                        optimized_sections[name] = sections[name]
+            
+            # Profile if enabled
+            if self.state.settings["show_profiling"]:
+                self.profile_sections(optimized_sections)
+            
+            # Assemble final script
+            return self.assemble_script(optimized_sections)
+            
+        except Exception as e:
+            self.log_error("workflow", e)
+            return script
+    
+    def optimize_section(self, name: str, content: str) -> str:
+        """Optimize a single section with error handling."""
+        try:
+            if not content.strip():
+                return content
+                
+            prompt = self.generate_prompt(name, content)
+            response = openai.ChatCompletion.create(
+                model=self.state.settings["model"],
+                messages=[
+                    {"role": "system", "content": "You are a Python optimization expert."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            optimized = response.choices[0].message.content.strip()
+            if not self.validate_section(optimized):
+                return content
+                
+            return optimized
+        except Exception as e:
+            self.log_error(f"optimization_{name}", e)
+            return content
 
 def main():
     auth_status, username = authenticate_user()

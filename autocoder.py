@@ -6,9 +6,6 @@ import subprocess
 import streamlit as st
 from typing import List, Dict, Any
 import openai
-from aider_chat import Aider
-import autogen
-from langchain.text_splitter import CharacterTextSplitter
 from difflib import unified_diff
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -16,49 +13,63 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_ace import st_ace
 from streamlit_agraph import agraph, Node, Edge, Config
+from tqdm import tqdm
+from langchain.memory import ConversationBufferMemory
 
 # ------------------- Configuration -------------------
 
 st.set_page_config(page_title="AutocoderAI", layout="wide")
 
+# ------------------- State Management -------------------
+
+class State:
+    def __init__(self):
+        self.script_sections = {}
+        self.optimized_script = ""
+        self.optimization_steps = []
+        self.settings = {
+            "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+            "model": "gpt-3.5-turbo",
+            "coder_initialized": False,
+            "show_profiling": False,
+            "profiling_depth": 10
+        }
+        self.profiling_results = {}
+        self.error_log = []
+        self.logs = []
+        self.memory = ConversationBufferMemory()
+
+state = State()
+
 # ------------------- Helper Functions -------------------
 
-def extract_sections(script_content: str) -> Dict[str, Any]:
-    """
-    Parses the Python script and divides it into sections:
-    - Package Installations
-    - Imports
-    - Settings
-    - Function Definitions
-    """
+def extract_sections(script: str) -> Dict[str, Any]:
     try:
-        tree = ast.parse(script_content)
+        tree = ast.parse(script)
     except SyntaxError as e:
-        st.error(f"Syntax Error in script: {e}")
+        log_error(f"Syntax Error: {e}")
         return {}
     
     sections = {
-        "package_installations": [],
         "imports": [],
         "settings": "",
-        "function_definitions": {}
+        "function_definitions": {},
+        "class_definitions": {},
+        "global_code": []
     }
-
-    for node in tree.body:
+    
+    for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             sections["imports"].append(ast.unparse(node))
-        elif isinstance(node, ast.Assign):
-            sections["settings"] += ast.unparse(node) + "\n"
         elif isinstance(node, ast.FunctionDef):
             sections["function_definitions"][node.name] = ast.unparse(node)
-        elif isinstance(node,git ast.Expr) and isinstance(node.value, ast.Call):
-            if isinstance(node.value.func, ast.Attribute):
-                if node.value.func.attr in ["system", "check_call", "run"]:
-                    for arg in node.value.args:
-                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                            match = re.findall(r'pip install ([\w\-\.\@]+)', arg.value)
-                            if match:
-                                sections["package_installations"].extend(match)
+        elif isinstance(node, ast.ClassDef):
+            sections["class_definitions"][node.name] = ast.unparse(node)
+        elif isinstance(node, ast.Assign):
+            sections["settings"] += ast.unparse(node) + "\n"
+        elif isinstance(node, ast.Expr):
+            sections["global_code"].append(ast.unparse(node))
+    
     return sections
 
 def generate_requirements(packages: List[str]) -> str:
@@ -69,35 +80,30 @@ def generate_requirements(packages: List[str]) -> str:
     pip_commands = [f"pip install {pkg}" for pkg in unique_packages]
     return "\n".join(pip_commands)
 
-def analyze_and_optimize(section_content: str, section_name: str, coder: Coder) -> str:
+def analyze_and_optimize(section_content: str, section_name: str) -> str:
     """
-    Uses Aider to analyze and optimize a given section of the code.
+    Uses OpenAI API to analyze and optimize a given section of the code.
     """
     prompt = f"""
-    You are an expert Python developer. Analyze the following `{section_name}` section of a Python script and optimize it. Ensure that:
-
-    - No functions or essential components are removed.
-    - Function names are not hallucinated or changed.
-    - Logic is optimized for efficiency and clarity.
-    - All inputs and outputs remain consistent.
-    - If using ORMs like SQLAlchemy, schema integrity is maintained.
-    - Improve error handling and add input validation where necessary.
-    - Enhance code readability and add comments for complex logic.
-
-    Here is the `{section_name}` section:
-
+    Analyze and optimize the following `{section_name}` section:
     ```python
     {section_content}
     ```
-
-    Provide the optimized `{section_name}` section.
+    Ensure efficiency, clarity, and best practices are followed.
     """
 
     try:
-        optimized_section = coder.edit(section_content, prompt)
+        response = openai.ChatCompletion.create(
+            model=state.settings["model"],
+            messages=[
+                {"role": "system", "content": "You are a Python code optimization assistant."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        optimized_section = response.choices[0].message.content
         return optimized_section
     except Exception as e:
-        st.error(f"Error during Aider optimization: {e}")
+        st.error(f"Error during OpenAI optimization: {e}")
         return section_content  # Return original if error occurs
 
 def supervise_changes(original: str, optimized: str) -> bool:
@@ -129,28 +135,11 @@ def install_packages(packages: List[str]):
         except subprocess.CalledProcessError as e:
             st.error(f"❌ Failed to install package: {pkg}\nError: {e}")
 
-def initialize_session_state():
-    """
-    Initializes necessary session states for Streamlit.
-    """
-    if 'script_sections' not in st.session_state:
-        st.session_state.script_sections = {}
-    if 'optimized_script' not in st.session_state:
-        st.session_state.optimized_script = ""
-    if 'optimization_steps' not in st.session_state:
-        st.session_state.optimization_steps = []
-    if 'current_step' not in st.session_state:
-        st.session_state.current_step = 0
-    if 'graph' not in st.session_state:
-        st.session_state.graph = nx.DiGraph()
-    if 'optimization_history' not in st.session_state:
-        st.session_state.optimization_history = []
-
 def add_log(message: str):
     """
     Adds a log message to the optimization steps.
     """
-    st.session_state.optimization_steps.append(message)
+    state.optimization_steps.append(message)
 
 def generate_script_map(function_definitions: Dict[str, str]) -> nx.DiGraph:
     """
@@ -200,8 +189,6 @@ def visualize_changes(original: str, optimized: str):
     st.markdown("### 🛠️ Changes")
     st.markdown(diff_html, unsafe_allow_html=True)
 
-# ------------------- New Helper Functions -------------------
-
 def validate_api_key(api_key: str) -> bool:
     """Validate the OpenAI API key."""
     if not api_key:
@@ -210,42 +197,160 @@ def validate_api_key(api_key: str) -> bool:
         openai.api_key = api_key
         openai.Model.list()
         return True
-    except:
+    except Exception as e:
+        st.error(f"API Key validation failed: {str(e)}")
         return False
 
-def optimize_section_async(section_name: str, section_content: str, coder: Coder):
-    """Asynchronously optimize a section of the script."""
-    optimized_content = analyze_and_optimize(section_content, section_name, coder)
-    return section_name, optimized_content
+def validate_script(script: str) -> bool:
+    """Validates script before optimization."""
+    try:
+        ast.parse(script)
+        return True
+    except SyntaxError as e:
+        st.error(f"Syntax error in script: Line {e.lineno}, {e.msg}")
+        return False
+    except Exception as e:
+        st.error(f"Error validating script: {str(e)}")
+        return False
 
-def optimize_script(script_input: str, optimization_strategy: str, coder: Coder) -> str:
+def optimize_section_async(section_name: str, section_content: str):
+    """Optimizes code section with proper error handling."""
+    if not section_content.strip():
+        return section_name, section_content
+        
+    try:
+        if not validate_script(section_content):
+            return section_name, section_content
+            
+        prompt = f"""Optimize this Python code section:
+        ```python
+        {section_content}
+        ```
+        Ensure: performance, readability, PEP 8 compliance"""
+        
+        response = openai.ChatCompletion.create(
+            model=state.settings["model"],
+            messages=[
+                {"role": "system", "content": "You are a Python optimization expert."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        optimized = response.choices[0].message.content.strip()
+        if not validate_script(optimized):
+            st.warning(f"Optimization result for {section_name} was invalid, keeping original")
+            return section_name, section_content
+            
+        return section_name, optimized
+    except Exception as e:
+        st.error(f"Error optimizing {section_name}: {str(e)}")
+        return section_name, section_content
+
+def optimize_script(script_input: str, optimization_strategy: str) -> str:
     sections = extract_sections(script_input)
-    st.session_state.script_sections = sections
+    state.script_sections = sections
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    with ThreadPoolExecutor() as executor:
         future_to_section = {
-            executor.submit(analyze_and_optimize, content, name, coder): name
+            executor.submit(optimize_section_async, name, content): name
             for name, content in sections.items() if name != "package_installations"
         }
         
-        for future in concurrent.futures.as_completed(future_to_section):
+        total = len(future_to_section)
+        for i, future in enumerate(as_completed(future_to_section)):
             section_name = future_to_section[future]
             try:
-                optimized_content = future.result()
+                _, optimized_content = future.result()
                 sections[section_name] = optimized_content
-                add_log(f"Optimized {section_name}")
+                progress = (i + 1) / total
+                progress_bar.progress(progress)
+                status_text.text(f"Optimizing {section_name} ({i+1}/{total})")
             except Exception as e:
-                add_log(f"Error optimizing {section_name}: {str(e)}")
+                st.error(f"Error optimizing {section_name}: {str(e)}")
 
-    # ... (rest of the function remains the same)
+    return "\n\n".join(sections.values())
+
+def generate_optimization_suggestion(user_input: str) -> str:
+    try:
+        response = openai.ChatCompletion.create(
+            model=state.settings["model"],
+            messages=[
+                {"role": "system", "content": "You are a Python code optimization assistant."},
+                {"role": "user", "content": f"Suggest improvements for this code:\n{user_input}"}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"Error generating suggestion: {e}")
+        return "Unable to generate suggestion at this time."
+
+def apply_advanced_optimizations(script: str, enable_type_hints: bool, enable_async: bool) -> str:
+    # Implement advanced optimizations here
+    # This is a placeholder and should be expanded based on specific requirements
+    return script
+
+def assemble_script() -> str:
+    """Assembles the final optimized script from sections."""
+    parts = []
+    
+    # Add package installations if present
+    if state.script_sections.get("package_installations"):
+        parts.append("# Package Installations")
+        parts.extend(state.script_sections["package_installations"])
+    
+    # Add imports
+    parts.append("\n# Imports")
+    parts.extend(state.script_sections.get("imports", []))
+    
+    # Add settings
+    parts.append("\n# Settings")
+    parts.append(state.script_sections.get("settings", ""))
+    
+    # Add function definitions
+    for name, content in state.script_sections.get("function_definitions", {}).items():
+        parts.append(f"\n# Function: {name}")
+        parts.append(content)
+    
+    return "\n".join(filter(None, parts))
+
+def save_final_code(code: str, filename: str = "optimized_script.py"):
+    with open(filename, "w") as f:
+        f.write(code)
+    st.success(f"Saved optimized code to {filename}")
+
+def display_optimized_script():
+    st.subheader("Optimized Script")
+    st.code(state.optimized_script, language="python")
+
+def display_function_graph():
+    """Displays interactive function dependency graph."""
+    if not state.script_sections.get("function_definitions"):
+        return
+        
+    graph = generate_script_map(state.script_sections["function_definitions"])
+    nodes = [Node(id=n, label=n, size=1000) for n in graph.nodes()]
+    edges = [Edge(source=e[0], target=e[1]) for e in graph.edges()]
+    config = Config(width=800, height=400, directed=True, physics=True)
+    
+    st.subheader("Function Dependencies")
+    agraph(nodes=nodes, edges=edges, config=config)
+
+def log_event(message: str, state: State):
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    state.optimization_steps.append(f"[{timestamp}] {message}")
+
+def log_error(message: str):
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    state.error_log.append(f"[{timestamp}] {message}")
 
 # ------------------- Streamlit UI -------------------
 
 def main():
     st.title("AutocoderAI 🧑‍💻✨")
     st.markdown("**Automated Python Script Manager and Optimizer using OpenAI's API**")
-
-    initialize_session_state()
 
     optimization_strategy = st.sidebar.selectbox(
         "Select Optimization Strategy",
@@ -258,8 +363,8 @@ def main():
     
     if api_key:
         if validate_api_key(api_key):
-            st.secrets["OPENAI_API_KEY"] = api_key
-            st.session_state['openai_model'] = model
+            state.settings["openai_api_key"] = api_key
+            state.settings["model"] = model
         else:
             st.sidebar.error("Invalid API Key")
 
@@ -273,31 +378,37 @@ def main():
         key="ace_editor"
     )
 
-    coder = initialize_aider()  # Add this line to initialize Aider
-
-    if st.button("🚀 Optimize Script"):
+    if st.button("🚀 Optimize Massive Script"):
         with st.spinner("Optimizing script..."):
-            optimized_script = optimize_script(script_input, optimization_strategy, coder)
-            st.session_state.optimized_script = optimized_script
+            optimized_script = optimize_script(script_input, optimization_strategy)
+            state.optimized_script = optimized_script
 
-    if st.session_state.optimized_script:
+        st.success("Optimization complete!")
+        st.download_button(
+            label="Download Optimized Script",
+            data=state.optimized_script,
+            file_name="optimized_massive_script.py",
+            mime="text/plain"
+        )
+
+    if state.optimized_script:
         st.subheader("Optimized Script Sections")
-        for section, content in st.session_state.script_sections.items():
+        for section, content in state.script_sections.items():
             if section != "package_installations":
-                st.session_state.script_sections[section] = st.text_area(f"Edit {section}", content, key=f"editor_{section}")
+                state.script_sections[section] = st.text_area(f"Edit {section}", content, key=f"editor_{section}")
 
         if st.button("Save Changes"):
-            st.session_state.optimized_script = assemble_script()
-            save_final_code(st.session_state.optimized_script)
+            state.optimized_script = assemble_script()
+            save_final_code(state.optimized_script)
 
         if st.button("Save Final Code"):
-            save_final_code(st.session_state.optimized_script)
+            save_final_code(state.optimized_script)
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Lines of Code", len(script_input.splitlines()), 
-                    len(st.session_state.optimized_script.splitlines()) - len(script_input.splitlines()))
-        col2.metric("Functions", len(st.session_state.script_sections.get("function_definitions", {})))
-        col3.metric("Imports", len(st.session_state.script_sections.get("imports", [])))
+                    len(state.optimized_script.splitlines()) - len(script_input.splitlines()))
+        col2.metric("Functions", len(state.script_sections.get("function_definitions", {})))
+        col3.metric("Imports", len(state.script_sections.get("imports", [])))
 
         st.subheader("Interactive Optimization Suggestions")
         user_input = st.chat_input("Ask for optimization suggestions")
@@ -311,20 +422,11 @@ def main():
         enable_type_hints = st.toggle("Enable Type Hints")
         enable_async = st.toggle("Enable Async Optimization")
         if enable_type_hints or enable_async:
-            st.session_state.optimized_script = apply_advanced_optimizations(
-                st.session_state.optimized_script, enable_type_hints, enable_async
+            state.optimized_script = apply_advanced_optimizations(
+                state.optimized_script, enable_type_hints, enable_async
             )
 
         display_optimized_script()
 
-# ... (rest of the existing code)
-
 if __name__ == "__main__":
     main()
-
-# Add this function to initialize Aider
-def initialize_aider() -> Coder:
-    io = InputOutput()
-    model = models.Model.create("gpt-4")
-    coder = Coder.create(main_model=model)
-    return coder

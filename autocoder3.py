@@ -610,3 +610,39 @@ aider_chat = chat.Chat(io=io, coder=coder)
 # Run the app
 if __name__ == "__main__":
     run_app()
+
+def generate_script_map(function_definitions: Dict[str, str]) -> nx.DiGraph:
+    graph = nx.DiGraph()
+    
+    # Add nodes first
+    for func_name in function_definitions:
+        graph.add_node(func_name)
+    
+    # Then add edges based on function calls
+    for func_name, func_code in function_definitions.items():
+        for other_func in function_definitions:
+            if other_func != func_name and other_func in func_code:
+                graph.add_edge(func_name, other_func)
+    
+    return graph
+
+def display_dependency_graph(graph: nx.DiGraph):
+    if not graph.nodes():
+        return
+        
+    fig = go.Figure(data=[go.Sankey(
+        node=dict(
+            pad=15,
+            thickness=20,
+            line=dict(color="black", width=0.5),
+            label=list(graph.nodes()),
+            color="blue"
+        ),
+        link=dict(
+            source=[list(graph.nodes()).index(edge[0]) for edge in graph.edges()],
+            target=[list(graph.nodes()).index(edge[1]) for edge in graph.edges()],
+            value=[1] * len(graph.edges())
+    ))])
+    
+    fig.update_layout(title_text="Function Dependencies", font_size=10)
+    st.plotly_chart(fig, use_container_width=True)

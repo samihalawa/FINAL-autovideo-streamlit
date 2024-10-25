@@ -20,6 +20,7 @@ import concurrent.futures
 import plotly.graph_objects as go
 from openai import OpenAI
 import json
+from autocoder import State, optimize_script, validate_api_key, save_final_code, generate_optimization_suggestion
 
 # Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
@@ -268,12 +269,9 @@ def save_final_code(code: str, filename: str = "optimized_script.py"):
 
 # Main interface
 def main_interface(coder: Coder):
-    st.title("AutocoderAI 🧑‍💻✨")
-    st.markdown("**Advanced Python Script Optimizer using OpenAI's API and Aider**")
+    tabs = st.tabs(["Code Input", "Optimization", "Results"])
     
-    tab1, tab2, tab3 = st.tabs(["Script Input", "Optimization", "Results"])
-    
-    with tab1:
+    with tabs[0]:
         script_input = st_ace(
             placeholder="Paste your Python script here...",
             language="python",
@@ -283,46 +281,34 @@ def main_interface(coder: Coder):
             min_lines=20,
             key="ace_editor"
         )
-    
-    with tab2:
-        if st.button("🚀 Optimize Script", key="optimize_button"):
+
+    with tabs[1]:
+        if st.button("🚀 Optimize Script"):
             if not script_input.strip():
-                st.error("Please paste a Python script before proceeding.")
+                st.error("Please enter code first")
                 return
-            
-            if not validate_api_key(st.session_state['openai_api_key']):
-                st.error("Please enter a valid OpenAI API key in the sidebar.")
-                return
-            
-            with st.spinner("Analyzing and optimizing script..."):
-                progress_bar = st.progress(0)
-                st.session_state['script_sections'] = extract_sections(script_input)
-                progress_bar.progress(25)
-                optimize_sections(coder)
-                progress_bar.progress(75)
-                st.session_state['final_script'] = assemble_script()
-                st.session_state['script_map'] = gen_script_map()
-                progress_bar.progress(100)
-            
-            st.success("Script optimization completed!")
-    
-    with tab3:
-        if st.session_state['final_script']:
-            st.subheader("📊 Optimized Script Sections")
-            for section, content in st.session_state['optimized_sections'].items():
-                with st.expander(f"{section.capitalize()}"):
-                    if isinstance(content, dict):
-                        for subsection, subcontent in content.items():
-                            st.session_state['optimized_sections'][section][subsection] = st.text_area(f"Edit {subsection}", subcontent, key=f"editor_{section}_{subsection}")
-                    else:
-                        st.session_state['optimized_sections'][section] = st.text_area(f"Edit {section}", "\n".join(content) if isinstance(content, list) else content, key=f"editor_{section}")
+                
+            with st.spinner("Optimizing..."):
+                try:
+                    st.session_state['script_sections'] = extract_sections(script_input)
+                    optimized = optimize_script(script_input, "standard")
+                    st.session_state['final_script'] = optimized
+                    st.success("Optimization complete!")
+                except Exception as e:
+                    st.error(f"Optimization failed: {str(e)}")
+                    log(f"Error: {str(e)}")
 
-            if st.button("Save Changes"):
-                st.session_state['final_script'] = assemble_script()
-                save_final_code(st.session_state['final_script'])
-
-            if st.button("Save Final Code"):
-                save_final_code(st.session_state['final_script'])
+    with tabs[2]:
+        if st.session_state.get('final_script'):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("Original vs Optimized")
+                st.code(st.session_state['final_script'], language="python")
+            with col2:
+                if st.session_state.get('script_sections'):
+                    display_dependency_graph(generate_script_map(
+                        st.session_state['script_sections'].get('function_definitions', {})
+                    ))
 
 # Sidebar settings
 def sidebar_settings(coder: Coder):
@@ -382,3 +368,38 @@ def run_app():
 # Main execution
 if __name__ == "__main__":
     run_app()
+
+def render_code_editor():
+    """Render the code editor with advanced features."""
+    editor_options = {
+        "theme": st.selectbox("Editor Theme", ["monokai", "github", "twilight"]),
+        "keybinding": st.selectbox("Keybinding", ["vscode", "vim", "emacs"]),
+        "font_size": st.slider("Font Size", 12, 24, 14),
+        "min_lines": 20,
+        "max_lines": 40,
+        "wrap": True,
+        "auto_update": True
+    }
+    
+    return st_ace(
+        placeholder="Enter your Python code here...",
+        language="python",
+        **editor_options,
+        key="code_editor"
+    )
+
+def render_optimization_controls():
+    """Render optimization controls and options."""
+    st.sidebar.subheader("Optimization Settings")
+    
+    optimization_options = {
+        "show_profiling": st.sidebar.checkbox("Show Profiling Results", False),
+        "profiling_depth": st.sidebar.slider("Profiling Depth", 5, 20, 10),
+        "parallel_optimization": st.sidebar.checkbox("Parallel Optimization", True),
+        "type_hints": st.sidebar.checkbox("Add Type Hints", False),
+        "async_code": st.sidebar.checkbox("Use Async/Await", False)
+    }
+    
+    if st.sidebar.button("Apply Settings"):
+        state.settings.update(optimization_options)
+        st.success("Settings updated!")

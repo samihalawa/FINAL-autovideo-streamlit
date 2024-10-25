@@ -4,41 +4,14 @@ import os
 import moviepy.editor as mpe
 import requests
 from tempfile import NamedTemporaryFile
-from moviepy.video.fx.all import fadein, fadeout, resize
-import psutil
-from tenacity import retry, wait_random_exponential, stop_after_attempt
-import json
-from PIL import Image, ImageDraw, ImageFont
-import shutil
 import logging
 from gtts import gTTS
 from dotenv import load_dotenv
-from pydub import AudioSegment
-import random
-import moviepy.video.fx.all as vfx
-import cv2
-from pydub.silence import split_on_silence
-import numpy as np
 import tempfile
-from functools import lru_cache
-from huggingface_hub import InferenceClient, hf_hub_download
-from huggingface_hub import login, HfApi
-from datasets import load_dataset
-import textwrap
-from scenedetect import detect, ContentDetector
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
-import re
-import argparse
-import os
-from concurrent.futures import ThreadPoolExecutor
-import requests
-from tqdm import tqdm
-import pandas as pd
-import cv2
-from sentence_transformers import SentenceTransformer
-import torch
-from yt_dlp import YoutubeDL
+import json
+import time
+import shutil
+import numpy as np
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -49,37 +22,9 @@ st.set_page_config(page_title="AutovideoAI", page_icon="🎥", layout="wide")
 
 # Load environment variables
 load_dotenv()
-hf_token = os.getenv("HUGGINGFACE_TOKEN")
 
-# Check if already logged in
-api = HfApi()
-try:
-    api.whoami(token=hf_token)
-    logger.info("Already logged in to Hugging Face")
-except Exception:
-    logger.info("Logging in to Hugging Face")
-    login(token=hf_token, add_to_git_credential=False)
-
-# Update OpenAI client initialization
-client = OpenAI()
-
-# Theme customization
-if 'theme' not in st.session_state:
-    st.session_state.theme = 'light'
-
-def toggle_theme():
-    st.session_state.theme = 'dark' if st.session_state.theme == 'light' else 'light'
-
-# Apply theme
-if st.session_state.theme == 'dark':
-    st.markdown("""
-    <style>
-    .stApp {
-        background-color: #1E1E1E;
-        color: white;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Sample prompts
 SAMPLE_PROMPTS = [
@@ -97,16 +42,24 @@ MUSIC_TRACKS = {
     "Instrumental": "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Kai_Engel/Sustains/Kai_Engel_-_03_-_Contention.mp3",
 }
 
-# Set up caching for downloaded assets
-@lru_cache(maxsize=100)
-def cached_download(url):
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.content
+def select_background_music(genre):
+    try:
+        if genre in MUSIC_TRACKS:
+            track_url = MUSIC_TRACKS[genre]
+        else:
+            track_url = random.choice(list(MUSIC_TRACKS.values()))
+        
+        response = requests.get(track_url)
+        if response.status_code == 200:
+            temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_audio_file.write(response.content)
+            temp_audio_file.close()
+            return temp_audio_file.name
+    except Exception as e:
+        logger.error(f"Error selecting background music: {str(e)}")
+    
     return None
 
-# 1. Function to generate storyboard based on user prompt using structured JSON
-@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(5))
 def generate_storyboard(prompt, style="motivational"):
     try:
         input_text = f"""Generate a detailed {style} video storyboard based on this prompt: "{prompt}"
@@ -134,7 +87,7 @@ def generate_storyboard(prompt, style="motivational"):
         Ensure there are at least 3 scenes in the storyboard."""
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": "You are a creative video storyboard generator. Respond with valid JSON following the specified structure."},
                 {"role": "user", "content": input_text}
@@ -149,6 +102,110 @@ def generate_storyboard(prompt, style="motivational"):
         logger.error(f"Error generating storyboard: {str(e)}")
         st.error("An error occurred while generating the storyboard. Please try again.")
     return None
+
+def create_scene_clip(scene, duration=5):
+    try:
+        # Create a gradient background
+        gradient = np.linspace(0, 255, 1280)
+        background = np.tile(gradient, (720, 1)).astype(np.uint8)
+        background = np.stack((background,) * 3, axis=-1)
+        
+        # Create video clip from the background
+        clip = mpe.ImageClip(background).set_duration(duration)
+        
+        # Add text
+        txt_clip = mpe.TextClip(scene['title'], fontsize=70, color='white', font='Arial-Bold')
+        txt_clip = txt_clip.set_position('center').set_duration(duration)
+        
+        # Add keywords as subtitles
+        if 'keywords' in scene:
+            keywords_txt = ", ".join(scene['keywords'])
+            keywords_clip = mpe.TextClip(keywords_txt, fontsize=30, color='yellow', font='Arial')
+            keywords_clip = keywords_clip.set_position(('center', 0.8), relative=True).set_duration(duration)
+            clip = mpe.CompositeVideoClip([clip, txt_clip, keywords_clip])
+        else:
+            clip = mpe.CompositeVideoClip([clip, txt_clip])
+        
+        # Add fade in and out
+        clip = clip.fadein(0.5).fadeout(0.5)
+        
+        return clip
+    except Exception as e:
+        logger.error(f"Error creating scene clip: {str(e)}")
+        return mpe.ColorClip(size=(1280, 720), color=(0,0,0)).set_duration(duration)
+
+def generate_voiceover(narration_text):
+    logger.info(f"Generating voiceover for text: {narration_text[:50]}...")
+    try:
+        tts = gTTS(text=narration_text, lang='en', slow=False)
+        temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        tts.save(temp_audio_file.name)
+        return mpe.AudioFileClip(temp_audio_file.name)
+    except Exception as e:
+        logger.error(f"Error generating voiceover: {str(e)}")
+        return mpe.AudioClip(lambda t: 0, duration=len(narration_text.split()) / 2)  # Silent audio
+
+def create_video(storyboard, background_music_file):
+    try:
+        clips = []
+        for scene in storyboard['scenes']:
+            clip = create_scene_clip(scene, float(scene['duration']))
+            narration = generate_voiceover(scene['narration'])
+            clip = clip.set_audio(narration)
+            clips.append(clip)
+        
+        final_clip = mpe.concatenate_videoclips(clips)
+        
+        if background_music_file:
+            background_music = mpe.AudioFileClip(background_music_file).volumex(0.1)
+            background_music = background_music.audio_loop(duration=final_clip.duration)
+            final_audio = mpe.CompositeAudioClip([final_clip.audio, background_music])
+            final_clip = final_clip.set_audio(final_audio)
+        
+        output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
+        final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac', fps=24)
+        return output_file
+    except Exception as e:
+        logger.error(f"Error in create_video: {str(e)}")
+        st.error(f"An error occurred while creating the video: {str(e)}")
+        return None
+
+def main():
+    st.title("AutovideoAI")
+    
+    prompt = st.text_input("Enter your video prompt:", placeholder="Create a motivational video about overcoming challenges")
+    
+    if st.button("Generate Video"):
+        with st.spinner("Generating storyboard..."):
+            storyboard = generate_storyboard(prompt)
+        
+        if storyboard:
+            st.success("Storyboard generated successfully!")
+            st.json(storyboard)
+            
+            music_style = st.selectbox("Select background music style:", list(MUSIC_TRACKS.keys()))
+            
+            if st.button("Create Video"):
+                with st.spinner("Creating video..."):
+                    background_music = select_background_music(music_style)
+                    video_file = create_video(storyboard, background_music)
+                
+                if video_file:
+                    st.success("Video created successfully!")
+                    st.video(video_file)
+                    
+                    with open(video_file, "rb") as file:
+                        st.download_button(
+                            label="Download Video",
+                            data=file,
+                            file_name="generated_video.mp4",
+                            mime="video/mp4"
+                        )
+        else:
+            st.error("Failed to generate storyboard. Please try again.")
+
+if __name__ == "__main__":
+    main()
 
 def validate_storyboard(storyboard):
     if "title" not in storyboard or "scenes" not in storyboard or not isinstance(storyboard["scenes"], list):
@@ -750,10 +807,10 @@ def log_system_resources():
 # 35. Function to download additional video assets (e.g., background music)
 def download_additional_assets(url):
     try:
-        response = requests.get(url)
-        if response.status_code == 200:
+        response = cached_download(url)
+        if response:
             temp_asset_file = NamedTemporaryFile(delete=False, suffix='.mp3')
-            temp_asset_file.write(response.content)
+            temp_asset_file.write(response)
             temp_asset_file.flush()
             st.success(f"Asset downloaded successfully: {temp_asset_file.name}")
             return temp_asset_file.name
@@ -991,121 +1048,83 @@ def create_video_workflow(prompt, duration, music_style):
     finally:
         cleanup_temp_files()
 
-def main():
-    st.markdown("<h1 style='text-align: center; color: #4A90E2;'>AutovideoAI</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; font-size: 1.2em;'>Create Amazing Videos with AI</p>", unsafe_allow_html=True)
-
-    with st.expander("ℹ️ How to use AutovideoAI", expanded=False):
-        st.markdown("""
-        1. Enter your video idea or choose a sample prompt.
-        2. Customize your video style, duration, and background music.
-        3. Generate a storyboard and preview it.
-        4. Create your AI-powered video!
-        """)
-
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("1️⃣ Enter Your Video Idea")
-        prompt = st.text_area("What's your video about?", height=100, value=st.session_state.get('prompt', ''))
-    
-    with col2:
-        st.subheader("Sample Prompts")
-        for sample_prompt in SAMPLE_PROMPTS:
-            if st.button(f"📌 {sample_prompt}", key=f"btn_{sample_prompt}"):
-                st.session_state.prompt = sample_prompt
-                st.rerun()
-
-    st.subheader("2️⃣ Customize Your Video")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        style = st.selectbox("Video Style 🎭", ["Motivational", "Dramatic", "Educational", "Funny"])
-    with col2:
-        duration = st.slider("Estimated Duration ⏱️", 30, 300, 60, help="Duration in seconds")
-    with col3:
-        music_style = st.selectbox("Background Music 🎵", list(MUSIC_TRACKS.keys()))
-
-    if st.button("🖋️ Generate Storyboard", use_container_width=True):
-        with st.spinner("Crafting your storyboard..."):
-            storyboard = generate_script(prompt, duration)
-        if storyboard:
-            st.session_state.storyboard = storyboard
-            st.success("✅ Storyboard generated successfully!")
-            display_storyboard_preview(storyboard)
-        else:
-            st.error("❌ Failed to generate a storyboard. Please try again.")
-
-    if 'storyboard' in st.session_state:
-        if st.button("🎬 Create Video", use_container_width=True):
-            create_video_workflow(prompt, duration, music_style)
-
-def display_storyboard_preview(storyboard):
-    with st.expander("🔍 Preview Storyboard", expanded=True):
-        st.markdown(f"### {storyboard['title']}")
-        st.markdown("### Scene Breakdown")
-        for scene in storyboard['scenes']:
-            with st.container():
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.markdown(f"**Scene {scene['scene_number']}**")
-                    st.write(f"Duration: {scene['duration']} seconds")
-                with col2:
-                    st.markdown(f"**{scene['title']}**")
-                    st.write(f"{scene['description']}")
-                st.markdown("---")
-
-# Add this function definition near the top of the file, after the imports
-def color_gradient(size, p1, p2, color1, color2):
-    x = np.linspace(0, 1, size[0])[:, None]
-    y = np.linspace(0, 1, size[1])[None, :]
-    gradient = x * (p2[0] - p1[0]) + y * (p2[1] - p1[1])
-    gradient = np.clip(gradient, 0, 1)
-    return np.array(color1) * (1 - gradient[:, :, None]) + np.array(color2) * gradient[:, :, None]
-
-def download_video(row, output_dir):
+def optimize_with_aider(script_input: str) -> str:
     try:
-        response = requests.get(row['video_url'], stream=True)
-        if response.status_code == 200:
-            filename = f"{row['videoid']}.mp4"
-            filepath = os.path.join(output_dir, filename)
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
-            return True
+        aider_chat = chat.Chat(io=None, coder=None)  # Initialize Aider chat
+        optimized_script = aider_chat.send_message(f"Optimize this Python code:\n\n{script_input}")
+        return optimized_script.content
     except Exception as e:
-        print(f"Error downloading {row['videoid']}: {str(e)}")
-    return False
+        st.error(f"Error during Aider optimization: {e}")
+        return script_input
 
-def process_video(filepath, fps=1):
-    cap = cv2.VideoCapture(filepath)
-    frames = []
-    count = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if count % int(cap.get(cv2.CAP_PROP_FPS) / fps) == 0:
-            frames.append(frame)
-        count += 1
-    cap.release()
-    return frames
+def animate_optimization(original_script: str, optimized_script: str):
+    placeholder = st.empty()
+    lines_original = original_script.split('\n')
+    lines_optimized = optimized_script.split('\n')
+    max_lines = max(len(lines_original), len(lines_optimized))
+    
+    for i in range(max_lines):
+        current_original = '\n'.join(lines_original[:i+1])
+        current_optimized = '\n'.join(lines_optimized[:i+1])
+        
+        col1, col2 = placeholder.columns(2)
+        with col1:
+            st.code(current_original, language='python')
+        with col2:
+            st.code(current_optimized, language='python')
+        
+        time.sleep(0.1)  # Adjust speed of animation
 
-def download_videos(args):
-    os.makedirs(args.output_dir, exist_ok=True)
-    df = pd.read_csv(args.input_csv)
+def extract_sections(script_content: str) -> Dict[str, Any]:
+    try:
+        tree = ast.parse(script_content)
+    except SyntaxError as e:
+        st.error(f"Syntax Error in script: {e}")
+        return {}
+    
+    sections = {
+        "package_installations": [],
+        "imports": [],
+        "settings": "",
+        "function_definitions": {}
+    }
 
-    with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
-        results = list(tqdm(executor.map(lambda row: download_video(row, args.output_dir), df.itertuples(index=False)), total=len(df)))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            sections["imports"].append(ast.unparse(node))
+        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            sections["settings"] += ast.unparse(node) + "\n"
+        elif isinstance(node, ast.FunctionDef):
+            sections["function_definitions"][node.name] = ast.unparse(node)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            if isinstance(node.value.func, ast.Attribute) and node.value.func.attr in ["system", "check_call", "run"]:
+                for arg in node.value.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        match = re.findall(r'pip install ([\w\-\.\@]+)', arg.value)
+                        if match:
+                            sections["package_installations"].extend(match)
+    return sections
 
-    print(f"Successfully downloaded {sum(results)} videos out of {len(df)}")
+def optimize_massive_script(script_input: str) -> str:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    if args.process:
-        for filename in os.listdir(args.output_dir):
-            if filename.endswith('.mp4'):
-                filepath = os.path.join(args.output_dir, filename)
-                frames = process_video(filepath, args.fps)
-                # Here you can save frames or perform further processing
+    sections = extract_sections(script_input)
+    optimized_sections = {}
+
+    for i, (section_name, content) in enumerate(sections.items()):
+        optimized_content = optimize_with_aider(content)
+        optimized_sections[section_name] = optimized_content
+        progress = (i + 1) / len(sections)
+        progress_bar.progress(progress)
+        status_text.text(f"Optimizing section {i+1}/{len(sections)}: {section_name}")
+        time.sleep(0.1)  # To allow for visual updates
+
+    return "\n\n".join(optimized_sections.values())
+
+def main():
+    st.title("Main App")
+    # Your existing Streamlit app code here
 
 if __name__ == "__main__":
-    main()
+    main()|
