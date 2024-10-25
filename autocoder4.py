@@ -122,11 +122,15 @@ def supervisor_review(changes, original_code):
     prompt = f"""
     As a senior code reviewer, analyze the following code changes:
 
-    Original Code:    ```python
-    {original_code}    ```
+    Original Code:
+    ```python
+    {original_code}
+    ```
 
-    Changed Code:    ```python
-    {changes}    ```
+    Changed Code:
+    ```python
+    {changes}
+    ```
 
     Provide a detailed review focusing on:
     1. Code quality improvements
@@ -436,5 +440,4 @@ def profile_performance(script: str):
     ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
     ps.print_stats()
     return s.getvalue()
-
 
