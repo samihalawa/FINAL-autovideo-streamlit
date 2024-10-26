@@ -14,6 +14,10 @@ import sys
 from contextlib import contextmanager
 import io
 from datetime import datetime
+import json
+from typing import Optional, Dict, Any
+import tempfile
+import shutil
 
 st.set_page_config(page_title="AI Autocoder Hub", layout="wide")
 
@@ -50,40 +54,49 @@ def load_module(module_name):
 def load_apps_from_directory():
     apps = {}
     for file in os.listdir():
-        if file.endswith('.py') and file != 'streamlithub.py':
+        if file.endswith('.py') and file != 'streamlit_app.py':
             app_name = os.path.splitext(file)[0].replace('_', ' ').title()
             apps[app_name] = file
     return apps
 
-def run_app_safely(module, app_name):
-    st.markdown(f"### Running: {app_name}")
-    
-    if st.button("🏠 Back to Hub"):
-        st.session_state.current_app = None
-        st.experimental_rerun()
-        return
+def init_session_state():
+    if 'app_states' not in st.session_state:
+        st.session_state.app_states = {}
+    if 'error_logs' not in st.session_state:
+        st.session_state.error_logs = {}
+    if 'last_successful_state' not in st.session_state:
+        st.session_state.last_successful_state = None
 
+def run_app_safely(module, app_name: str) -> None:
     try:
+        # Save current state before running
+        st.session_state.last_successful_state = st.session_state.app_states.get(app_name, {}).copy()
+        
         with capture_streamlit_error() as captured:
             if hasattr(module, 'main'):
                 module.main()
+                # Update successful state
+                st.session_state.app_states[app_name] = st.session_state.copy()
             else:
-                st.error(f"No main() function found in {app_name}")
+                raise AttributeError(f"No main() function found in {app_name}")
         
         error_output = captured.getvalue()
         if error_output:
+            st.session_state.error_logs[app_name] = error_output
             with st.expander("Show App Errors/Logs"):
                 st.code(error_output)
                 
     except Exception as e:
         st.error(f"Error running {app_name}: {str(e)}")
+        # Restore last successful state
+        if st.session_state.last_successful_state:
+            st.session_state.app_states[app_name] = st.session_state.last_successful_state
         with st.expander("Show Error Details"):
             st.exception(e)
 
 def create_new_app():
     st.subheader("Create New App")
     
-    # Add import from GitHub
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### Create New")
@@ -99,32 +112,45 @@ def create_new_app():
         app_name = st.text_input("App Name")
         template = st.selectbox("Template", list(templates.keys()))
         
-        # Template preview and customization
         st.session_state.current_template = templates[template]
         handle_template_customization()
         
         if st.button("Create App"):
             if not app_name:
                 st.error("Please enter an app name")
-                return
+                return None
                 
             file_name = f"{app_name.lower().replace(' ', '_')}.py"
             if os.path.exists(file_name):
                 st.error(f"App {file_name} already exists")
-                return
+                return None
                 
             try:
                 with open(file_name, 'w') as f:
                     f.write(st.session_state.current_template)
                 st.success(f"Created {file_name} successfully!")
-                st.experimental_rerun()
+                # Save app metadata
+                metadata = {
+                    "created": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "template": template,
+                    "name": app_name,
+                    "version": "1.0.0"
+                }
+                update_app_metadata(file_name, metadata)
+                save_app_state(app_name, {"template": template})
+                
+                st.cache_data.clear()
+                time.sleep(0.5)
+                st.rerun()
+                return file_name
             except Exception as e:
                 st.error(f"Error creating app: {str(e)}")
+                return None
     
     else:  # Import from GitHub
         if 'gh_token' not in st.session_state:
             st.error("Please set GitHub token in settings first")
-            return
+            return None
             
         try:
             g = Github(st.session_state.gh_token)
@@ -138,9 +164,10 @@ def create_new_app():
                         with open(content.path, 'w') as f:
                             f.write(content.decoded_content.decode())
                 st.success("Successfully imported files")
-                st.experimental_rerun()
+                st.rerun()
         except Exception as e:
             st.error(f"Error importing from GitHub: {str(e)}")
+            return None
 
 def manage_dependencies():
     st.subheader("Dependency Management")
@@ -151,7 +178,7 @@ def manage_dependencies():
     except FileNotFoundError:
         current_reqs = ""
         
-    col1, col2 = st.columns([2,1])
+    col1, col2 = st.columns([2, 1])
     
     with col1:
         new_reqs = st_ace(
@@ -164,9 +191,12 @@ def manage_dependencies():
     with col2:
         st.markdown("### Actions")
         if st.button("Save Changes"):
-            with open('requirements.txt', 'w') as f:
-                f.write(new_reqs)
-            st.success("Requirements updated!")
+            try:
+                with open('requirements.txt', 'w') as f:
+                    f.write(new_reqs)
+                st.success("Requirements updated!")
+            except Exception as e:
+                st.error(f"Error saving requirements: {str(e)}")
 
 def github_integration():
     st.subheader("GitHub Integration")
@@ -199,11 +229,9 @@ def github_integration():
             
             if st.button("Sync with GitHub"):
                 try:
-                    # First pull
                     st.info("Pulling latest changes...")
                     git_workflow(repo)
                     
-                    # Then push
                     for file in files_to_sync:
                         try:
                             with open(file, 'r') as f:
@@ -253,21 +281,21 @@ def update_requirements(template):
         st.error(f"Error updating requirements: {str(e)}")
 
 def get_app_metadata(file_path):
-    """Get metadata for an app file"""
     try:
         stats = os.stat(file_path)
+        with open(file_path, 'r') as f:
+            content = f.read()
         return {
             "size": f"{stats.st_size/1024:.1f} KB",
             "modified": datetime.fromtimestamp(stats.st_mtime).strftime('%Y-%m-%d %H:%M'),
             "lines": sum(1 for _ in open(file_path)),
-            "has_main": "main()" in open(file_path).read()
+            "has_main": "def main():" in content
         }
     except Exception as e:
         logger.error(f"Error getting metadata: {str(e)}")
         return {}
 
 def show_breadcrumbs(selected, current_app=None):
-    """Display navigation breadcrumbs"""
     crumbs = ["🏠 Home"]
     if selected != "🏠 Home":
         crumbs.append(selected)
@@ -277,7 +305,6 @@ def show_breadcrumbs(selected, current_app=None):
     st.markdown(" > ".join(crumbs))
 
 def show_app_preview(app_path):
-    """Show app preview with syntax highlighting"""
     try:
         with open(app_path, 'r') as f:
             content = f.read()
@@ -286,10 +313,7 @@ def show_app_preview(app_path):
     except Exception as e:
         st.error(f"Error loading preview: {str(e)}")
 
-# Add these new functions after the existing imports
-
 def search_apps(apps, query):
-    """Search apps by name or content"""
     if not query:
         return apps
     
@@ -305,7 +329,6 @@ def search_apps(apps, query):
     return results
 
 def clone_app(original_path, new_name):
-    """Clone an existing app"""
     try:
         new_path = f"{new_name.lower().replace(' ', '_')}.py"
         if os.path.exists(new_path):
@@ -318,9 +341,7 @@ def clone_app(original_path, new_name):
         return False, str(e)
 
 def validate_requirements(requirements_text):
-    """Validate requirements format and availability"""
     try:
-        from pkg_resources import parse_requirements  # More specific import
         requirements = [r.strip() for r in requirements_text.split('\n') if r.strip()]
         invalid = []
         for req in requirements:
@@ -333,21 +354,18 @@ def validate_requirements(requirements_text):
         return False, str(e)
 
 def show_diff(original, modified):
-    """Show differences between two versions of code"""
-    import difflib  # built-in module
+    import difflib
     d = difflib.HtmlDiff()
     diff_html = d.make_file(original.splitlines(), modified.splitlines())
-    st.markdown(diff_html, unsafe_allow_html=True)  # Use markdown instead of components.v1.html
+    st.markdown(diff_html, unsafe_allow_html=True)
 
 def git_workflow(repo, branch='main'):
-    """Enhanced GitHub workflow with branch support and history"""
     branches = [b.name for b in repo.get_branches()]
     selected_branch = st.selectbox("Select Branch", branches, index=branches.index('main') if 'main' in branches else 0)
     
-    # Pull latest changes
     if st.button("Pull Latest Changes"):
         try:
-            contents = repo.get_contents("")
+            contents = repo.get_contents("", ref=selected_branch)
             for content in contents:
                 if content.path.endswith('.py'):
                     file_content = content.decoded_content.decode()
@@ -357,9 +375,8 @@ def git_workflow(repo, branch='main'):
         except Exception as e:
             st.error(f"Error pulling changes: {str(e)}")
 
-    # Show commit history
     with st.expander("Commit History"):
-        commits = repo.get_commits()
+        commits = repo.get_commits(sha=selected_branch)
         for commit in list(commits)[:5]:
             st.markdown(f"**{commit.commit.message}**")
             st.markdown(f"Author: {commit.commit.author.name}")
@@ -367,10 +384,9 @@ def git_workflow(repo, branch='main'):
             st.markdown("---")
 
 def handle_template_customization():
-    """Handle template customization and preview"""
     st.subheader("Template Customization")
     
-    template = st.session_state.get('current_template', '')  # Changed from {} to ''
+    template = st.session_state.get('current_template', '')
     if not template:
         return
     
@@ -383,7 +399,7 @@ def handle_template_customization():
             theme="monokai",
             height=300
         )
-        st.session_state.current_template = modified_template  # Save changes
+        st.session_state.current_template = modified_template
     
     with col2:
         st.markdown("### Preview")
@@ -391,7 +407,6 @@ def handle_template_customization():
             st.code(modified_template, language="python")
 
 def version_control():
-    """Basic version control for app editing"""
     if 'version_history' not in st.session_state:
         st.session_state.version_history = []
     if 'current_code' not in st.session_state:
@@ -410,11 +425,108 @@ def version_control():
             st.session_state.version_history.append(st.session_state.current_code)
             return None
 
+class ResourceManager:
+    def __init__(self):
+        self.active_resources: Dict[str, Any] = {}
+        self.cleanup_queue = []
+
+    def register(self, resource_id: str, resource: Any, cleanup_func=None):
+        self.active_resources[resource_id] = resource
+        if cleanup_func:
+            self.cleanup_queue.append((resource_id, cleanup_func))
+
+    def cleanup(self):
+        for resource_id, cleanup_func in self.cleanup_queue:
+            try:
+                cleanup_func(self.active_resources.get(resource_id))
+            except Exception as e:
+                logger.error(f"Cleanup error for {resource_id}: {e}")
+        self.cleanup_queue.clear()
+        self.active_resources.clear()
+
+class AppProcess:
+    def __init__(self):
+        self.processes = {}
+        self.ports = {}
+        self.resource_manager = ResourceManager()
+
+    def start(self, app_path: str) -> int:
+        if app_path in self.processes:
+            self.stop(app_path)
+        
+        # Create a temporary directory for the app
+        temp_dir = tempfile.mkdtemp()
+        temp_app_path = os.path.join(temp_dir, os.path.basename(app_path))
+        shutil.copy2(app_path, temp_app_path)
+        
+        # Run the app using streamlit run
+        port = self._get_free_port()
+        cmd = f"streamlit run {temp_app_path} --server.port={port}"
+        
+        # Use Popen to run the command
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        self.processes[app_path] = process
+        self.ports[app_path] = port
+        self.resource_manager.register(app_path, temp_dir, cleanup_func=shutil.rmtree)
+        
+        return port
+
+    def stop(self, app_path):
+        if app_path in self.processes:
+            self.processes[app_path].terminate()
+            del self.processes[app_path]
+            del self.ports[app_path]
+            self.resource_manager.cleanup()
+
+    def _get_free_port(self):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+def update_app_metadata(file_name, metadata):
+    try:
+        with open('streamlit_apps.json', 'r+') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                data = {}
+            data[file_name] = metadata
+            f.seek(0)
+            f.truncate()
+            json.dump(data, f, indent=4)
+    except FileNotFoundError:
+        with open('streamlit_apps.json', 'w') as f:
+            json.dump({file_name: metadata}, f, indent=4)
+
+def load_app_state(app_name: str) -> Optional[Dict]:
+    try:
+        with open('session_state.json', 'r') as f:
+            states = json.load(f)
+            return states.get(app_name)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+def save_app_state(app_name: str, state: Dict) -> None:
+    try:
+        states = {}
+        if os.path.exists('session_state.json'):
+            with open('session_state.json', 'r') as f:
+                states = json.load(f)
+        states[app_name] = state
+        with open('session_state.json', 'w') as f:
+            json.dump(states, f)
+    except Exception as e:
+        logger.error(f"Failed to save app state: {e}")
+
 def main():
+    init_session_state()
     if 'current_app' not in st.session_state:
         st.session_state.current_app = None
+    if 'app_manager' not in st.session_state:
+        st.session_state.app_manager = AppProcess()
 
-    # Sidebar navigation
     with st.sidebar:
         selected = option_menu(
             "AI Autocoder Hub", 
@@ -436,7 +548,6 @@ def main():
             if app_selected:
                 st.session_state.current_app = app_selected
                 
-                # Show app metadata in sidebar
                 app_path = apps[app_selected]
                 metadata = get_app_metadata(app_path)
                 st.markdown("### App Info")
@@ -448,48 +559,86 @@ def main():
         if st.button("🔄 Refresh"):
             with st.spinner("Refreshing..."):
                 st.cache_data.clear()
-                st.experimental_rerun()
+                st.rerun()
 
-    # Show breadcrumbs
     show_breadcrumbs(selected, st.session_state.current_app)
 
-    # Main content area
     if selected == "🏠 Home":
         st.title("Welcome to AI Autocoder Hub")
         apps = load_apps_from_directory()
         
         for app_name, app_path in apps.items():
             st.markdown("---")
-            col1, col2, col3, col4 = st.columns([3,1,1,1])
+            col1, col2, col3 = st.columns([3, 1, 1])
             with col1:
                 st.markdown(f"### 📱 {app_name}")
                 metadata = get_app_metadata(app_path)
                 st.markdown(f"Last modified: {metadata.get('modified', 'N/A')} | Lines: {metadata.get('lines', 'N/A')}")
+                
+                with st.expander("Source Code"):
+                    with open(app_path, 'r') as f:
+                        code_content = f.read()
+                    edited_code = st_ace(
+                        value=code_content,
+                        language="python",
+                        theme="monokai",
+                        height=300,
+                        key=f"editor_{app_name}"
+                    )
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Apply Changes", key=f"apply_{app_name}"):
+                            try:
+                                with open(app_path, 'w') as f:
+                                    f.write(edited_code)
+                                st.success("Changes saved!")
+                                st.cache_data.clear()
+                                st.cache_resource.clear()
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error saving: {str(e)}")
+                    with col2:
+                        if st.button("Revert", key=f"revert_{app_name}"):
+                            st.rerun()
+                    
             with col2:
                 if st.button("👁️ Preview", key=f"preview_{app_name}"):
-                    show_app_preview(app_path)
+                    with st.expander("Code Preview", expanded=True):
+                        st.code(code_content, language="python")
+                    
             with col3:
                 if st.button("▶️ Launch", key=f"launch_{app_name}"):
-                    with st.spinner("Loading app..."):
-                        st.session_state.current_app = app_name
-                        st.experimental_rerun()
-            with col4:
-                if st.button("✏️ Edit", key=f"edit_{app_name}"):
-                    st.session_state.current_app = app_name
-                    selected = "📱 Apps"
-                    st.experimental_rerun()
-                    
+                    try:
+                        port = st.session_state.app_manager.start(app_path)
+                        time.sleep(1)  # Wait for server to start
+                        app_url = f"http://localhost:{port}"
+                        st.markdown(
+                            f"""
+                            <div style='text-align: center'>
+                                <a href="{app_url}" target="_blank">
+                                    <button style='padding: 8px 16px; background-color: #4CAF50; 
+                                            color: white; border: none; border-radius: 4px;'>
+                                        Open App in New Tab
+                                    </button>
+                                </a>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                    except Exception as e:
+                        st.error(f"Error launching app: {str(e)}")
+
     elif selected == "📱 Apps":
         if st.session_state.current_app:
             apps = load_apps_from_directory()
             app_path = apps.get(st.session_state.current_app)
             if app_path and os.path.exists(app_path):
-                # Enhanced app controls
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     if st.button("🔄 Restart App"):
                         st.cache_resource.clear()
-                        st.experimental_rerun()
+                        st.rerun()
                 with col2:
                     if st.button("📝 View Code"):
                         show_app_preview(app_path)
@@ -500,6 +649,7 @@ def main():
                             success, msg = clone_app(app_path, new_name)
                             if success:
                                 st.success(msg)
+                                update_app_metadata(new_name, get_app_metadata(app_path))
                             else:
                                 st.error(msg)
                 with col4:
@@ -513,7 +663,6 @@ def main():
                             mime="text/plain"
                         )
 
-                # Split view for editing while running
                 if st.checkbox("Enable Split View"):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -527,13 +676,15 @@ def main():
                                 height=400
                             )
                             if st.button("Save Changes"):
-                                with open(app_path, 'w') as f:
-                                    f.write(modified_code)
-                                st.success("Changes saved!")
-                                
-                                # Show diff
-                                with st.expander("View Changes"):
-                                    show_diff(original_code, modified_code)
+                                try:
+                                    with open(app_path, 'w') as f:
+                                        f.write(modified_code)
+                                    st.success("Changes saved!")
+                                    
+                                    with st.expander("View Changes"):
+                                        show_diff(original_code, modified_code)
+                                except Exception as e:
+                                    st.error(f"Error saving changes: {str(e)}")
                     
                     with col2:
                         st.markdown("### App Output")
@@ -544,7 +695,6 @@ def main():
                         except Exception as e:
                             st.error(f"Error loading app: {str(e)}")
                 else:
-                    # Regular app view
                     try:
                         module = load_module(os.path.splitext(os.path.basename(app_path))[0])
                         if module:
@@ -557,16 +707,18 @@ def main():
         
     elif selected == "📦 Dependencies":
         manage_dependencies()
-        # Add requirements validation
         if st.button("Validate Requirements"):
-            with open('requirements.txt', 'r') as f:
-                reqs = f.read()
-            valid, invalid = validate_requirements(reqs)
-            if valid:
-                st.success("All requirements are valid!")
-            else:
-                st.error("Invalid requirements found:")
-                st.write(invalid)
+            try:
+                with open('requirements.txt', 'r') as f:
+                    reqs = f.read()
+                valid, invalid = validate_requirements(reqs)
+                if valid:
+                    st.success("All requirements are valid!")
+                else:
+                    st.error("Invalid requirements found:")
+                    st.write(invalid)
+            except FileNotFoundError:
+                st.warning("requirements.txt not found. Please create it first.")
         
     elif selected == "🔄 Sync":
         github_integration()
@@ -578,19 +730,36 @@ def main():
         
         with tab1:
             st.markdown("### General Settings")
-            auto_save = st.checkbox("Auto Save", value=True)
-            show_previews = st.checkbox("Show Code Previews", value=True)
-            dark_mode = st.checkbox("Dark Mode", value=False)
+            auto_save = st.checkbox("Auto Save", value=st.session_state.get('auto_save', True))
+            show_previews = st.checkbox("Show Code Previews", value=st.session_state.get('show_previews', True))
+            dark_mode = st.checkbox("Dark Mode", value=st.session_state.get('dark_mode', False))
+            
+            if st.button("Save General Settings"):
+                st.session_state.auto_save = auto_save
+                st.session_state.show_previews = show_previews
+                st.session_state.dark_mode = dark_mode
+                st.success("Settings saved!")
             
         with tab2:
             st.markdown("### GitHub Settings")
-            gh_token = st.text_input("GitHub Token", 
-                                   type="password",
-                                   value=st.session_state.get('gh_token', ''))
-            if gh_token:
-                st.session_state['gh_token'] = gh_token
+            default_token = os.getenv('GH_TOKEN') or ''
+            gh_token = st.text_input(
+                "GitHub Token", 
+                type="password",
+                value=default_token
+            )
+            if st.button("Save GitHub Token"):
+                try:
+                    # Validate token
+                    g = Github(gh_token)
+                    g.get_user().login
+                    st.session_state['gh_token'] = gh_token
+                    with open('.env', 'a') as f:
+                        f.write(f"\nGH_TOKEN={gh_token}")
+                    st.success("GitHub token saved and validated!")
+                except Exception as e:
+                    st.error(f"Invalid GitHub token: {str(e)}")
 
-    # Add status indicator
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Status")
     if st.session_state.current_app:
@@ -599,4 +768,10 @@ def main():
         st.sidebar.info("No app running")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        if 'app_manager' in st.session_state:
+            for app_path in list(st.session_state.app_manager.processes.keys()):
+                st.session_state.app_manager.stop(app_path)
+
