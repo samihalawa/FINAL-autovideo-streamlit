@@ -9,7 +9,29 @@ import ast
 import re
 
 def extract_sections(script_content: str) -> Dict[str, Any]:
-    # (Use the same implementation as in autocoder4.py)
+    """Extract code sections from script content."""
+    try:
+        tree = ast.parse(script_content)
+        sections = {
+            'imports': [],
+            'settings': [],
+            'function_definitions': {},
+            'class_definitions': {}
+        }
+        
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                sections['imports'].append(ast.get_source_segment(script_content, node))
+            elif isinstance(node, ast.Assign):
+                sections['settings'].append(ast.get_source_segment(script_content, node))
+            elif isinstance(node, ast.FunctionDef):
+                sections['function_definitions'][node.name] = ast.get_source_segment(script_content, node)
+            elif isinstance(node, ast.ClassDef):
+                sections['class_definitions'][node.name] = ast.get_source_segment(script_content, node)
+        
+        return sections
+    except SyntaxError:
+        return {}
 
 def optimize_with_aider(script_input: str) -> str:
     try:

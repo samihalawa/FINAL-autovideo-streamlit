@@ -1,4 +1,4 @@
-# AutocoderAI - Enhanced Streamlit Application for Code Optimization
+# AutocoderAI - Production-Ready Streamlit Application for Code Optimization
 
 import os
 import re
@@ -6,7 +6,7 @@ import ast
 import json
 import subprocess
 import streamlit as st
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple, Callable
 import openai
 from difflib import unified_diff
 import networkx as nx
@@ -23,20 +23,30 @@ import io
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
 from aider import chat
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from functools import cache, lru_cache
 import asyncio
-from typing import Tuple, Callable
 import traceback
 from contextlib import contextmanager
 import psutil
-from dataclasses import asdict
+import sys
+from pathlib import Path
+from openai import OpenAI
+from langchain.memory import ConversationBufferMemory
+from dataclasses import field
+from datetime import datetime, timedelta
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from .env file if it exists
+env_path = Path('.env')
+if env_path.exists():
+    load_dotenv(env_path)
 
 # Configuration
-st.set_page_config(page_title="AutocoderAI", layout="wide")
+st.set_page_config(
+    page_title="AutocoderAI",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Constants
 DEFAULT_OPENAI_MODEL = "gpt-4"
@@ -44,9 +54,23 @@ DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 MAX_RETRIES = 3
 TIMEOUT_SECONDS = 30
 SUPPORTED_MODELS = ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo-preview"]
+LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
+LOG_FILE = "autocoder.log"
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format=LOG_FORMAT,
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 # Type definitions
-@dataclass
+@dataclass(frozen=True)
 class Settings:
     openai_api_key: str
     model: str
@@ -55,8 +79,9 @@ class Settings:
     timeout_seconds: int = TIMEOUT_SECONDS
     max_retries: int = MAX_RETRIES
     debug_mode: bool = False
+    log_level: str = "INFO"
 
-@dataclass 
+@dataclass
 class AppState:
     script_sections: Dict[str, Any]
     optimized_script: str
@@ -69,99 +94,160 @@ class AppState:
     error_log: List[str]
     logs: List[str]
 
-# Initialize session state
-if 'state' not in st.session_state:
-    st.session_state.state = AppState(
-        script_sections={},
-        optimized_script="",
-        optimization_steps=[],
-        current_step=0,
-        graph=nx.DiGraph(),
-        optimization_history=[],
-        settings=Settings(
-            openai_api_key=DEFAULT_OPENAI_API_KEY,
-            model=DEFAULT_OPENAI_MODEL
-        ),
-        profiling_results={},
-        error_log=[],
-        logs=[]
-    )
+    def clear(self):
+        """Safely clear all state data"""
+        self.script_sections.clear()
+        self.optimized_script = ""
+        self.optimization_steps.clear()
+        self.current_step = 0
+        self.graph.clear()
+        self.optimization_history.clear()
+        self.profiling_results.clear()
+        self.error_log.clear()
+        self.logs.clear()
 
+def initialize_state() -> None:
+    """Initialize application state with defaults"""
+    if 'state' not in st.session_state:
+        try:
+            st.session_state.state = AppState(
+                script_sections={},
+                optimized_script="",
+                optimization_steps=[],
+                current_step=0,
+                graph=nx.DiGraph(),
+                optimization_history=[],
+                settings=Settings(
+                    openai_api_key=DEFAULT_OPENAI_API_KEY,
+                    model=DEFAULT_OPENAI_MODEL
+                ),
+                profiling_results={},
+                error_log=[],
+                logs=[]
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize state: {str(e)}")
+            raise
+
+initialize_state()
 state = st.session_state.state
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 def log(msg: str, level: str = "INFO") -> None:
-    """Centralized logging function"""
-    getattr(logging, level.lower())(msg)
-    state.logs.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {level}: {msg}")
+    """Centralized logging function with error handling"""
+    try:
+        log_level = getattr(logging, level.upper())
+        logger.log(log_level, msg)
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        state.logs.append(f"[{timestamp}] {level}: {msg}")
+    except Exception as e:
+        logger.error(f"Logging error: {str(e)}")
 
-# Validation functions
 def validate_api_key(key: str) -> bool:
     """Validate OpenAI API key format"""
+    if not key:
+        return False
     return bool(re.match(r'^sk-[a-zA-Z0-9]{48}$', key))
 
 def validate_input(script: str) -> bool:
     """Validate Python script input"""
+    if not script or not isinstance(script, str):
+        return False
     try:
         ast.parse(script)
         return True
-    except SyntaxError:
+    except (SyntaxError, ValueError, TypeError):
         return False
 
-# State management functions
-@st.cache_data
+@st.cache_data(ttl=3600)
 def set_openai_creds(key: str, model: str) -> None:
-    """Set OpenAI credentials with validation"""
+    """Set OpenAI credentials with validation and caching"""
     try:
         if not validate_api_key(key):
             raise ValueError("Invalid API key format")
+        if model not in SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported model. Must be one of: {', '.join(SUPPORTED_MODELS)}")
+        
         openai.api_key = key
-        state.settings.openai_api_key = key
-        state.settings.model = model
+        state.settings = Settings(
+            openai_api_key=key,
+            model=model,
+            profiling_depth=state.settings.profiling_depth,
+            show_profiling=state.settings.show_profiling,
+            timeout_seconds=state.settings.timeout_seconds,
+            max_retries=state.settings.max_retries,
+            debug_mode=state.settings.debug_mode
+        )
+        
+        # Verify API key works
         openai.Model.list()
-        log("OpenAI credentials set successfully.")
+        log("OpenAI credentials set successfully")
     except Exception as e:
-        st.error(f"Error setting OpenAI credentials: {str(e)}")
-        log(f"Error: {str(e)}", "ERROR")
+        error_msg = f"Error setting OpenAI credentials: {str(e)}"
+        log(error_msg, "ERROR")
+        raise ValueError(error_msg)
 
-# File operations
 def save_final_code(code: str, filename: str = "optimized_script.py") -> None:
-    """Save optimized code to file with error handling"""
+    """Save optimized code to file with comprehensive error handling"""
+    if not code or not isinstance(code, str):
+        raise ValueError("Invalid code input")
+        
     try:
-        with open(filename, "w") as f:
+        # Validate code before saving
+        if not validate_input(code):
+            raise ValueError("Invalid Python syntax in optimized code")
+            
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+        
+        # Write with error handling
+        with open(filename, "w", encoding='utf-8') as f:
             f.write(code)
+            
+        log(f"Successfully saved optimized code to {filename}")
         st.success(f"Saved optimized code to {filename}")
-    except IOError as e:
-        st.error(f"Error saving file: {str(e)}")
-        log(f"File save error: {str(e)}", "ERROR")
+        
+    except (IOError, OSError) as e:
+        error_msg = f"Error saving file: {str(e)}"
+        log(error_msg, "ERROR")
+        raise IOError(error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error saving file: {str(e)}"
+        log(error_msg, "ERROR")
+        raise
 
-# Performance profiling
 @st.cache_resource
 def profile_performance(script: str) -> str:
-    """Profile code performance with error handling"""
+    """Profile code performance with comprehensive error handling"""
+    if not script or not isinstance(script, str):
+        raise ValueError("Invalid script input")
+        
     pr = cProfile.Profile()
     pr.enable()
     
     try:
         if not validate_input(script):
             raise SyntaxError("Invalid Python syntax")
-        exec(script)
+            
+        # Create isolated namespace for execution
+        namespace = {}
+        exec(script, namespace)
+        
     except Exception as e:
-        state.error_log.append(f"Error during profiling: {str(e)}")
-        log(f"Profiling error: {str(e)}", "ERROR")
+        error_msg = f"Error during profiling: {str(e)}"
+        state.error_log.append(error_msg)
+        log(error_msg, "ERROR")
+        raise
+        
     finally:
         pr.disable()
         s = io.StringIO()
         ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
-        ps.print_stats()
+        ps.print_stats(state.settings.profiling_depth)
     
     return s.getvalue()
 
-# Script optimization
-async def optimize_script(script_input: str, optimization_strategy: str) -> str:
-    """Optimize script with progress tracking and error handling"""
+async def optimize_script(script_input: str, optimization_strategy: str = "performance") -> str:
+    """Optimize script with progress tracking and comprehensive error handling"""
     if not validate_input(script_input):
         raise ValueError("Invalid Python script")
         
@@ -171,101 +257,103 @@ async def optimize_script(script_input: str, optimization_strategy: str) -> str:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    async with ThreadPoolExecutor() as executor:
-        future_to_section = {
-            executor.submit(optimize_section_async, name, content): name
-            for name, content in sections.items() 
-            if name != "package_installations"
-        }
+    try:
+        async with ThreadPoolExecutor() as executor:
+            future_to_section = {
+                executor.submit(
+                    optimize_section_async, 
+                    name, 
+                    content
+                ): name
+                for name, content in sections.items()
+                if name != "package_installations"
+            }
+            
+            total = len(future_to_section)
+            optimized_sections = {}
+            
+            for i, future in enumerate(as_completed(future_to_section)):
+                section_name = future_to_section[future]
+                try:
+                    name, optimized_content = await future.result()
+                    optimized_sections[name] = optimized_content
+                    
+                    # Update progress
+                    progress = (i + 1) / total
+                    progress_bar.progress(progress)
+                    status_text.text(f"Optimizing {section_name} ({i+1}/{total})")
+                    
+                    # Profile if enabled
+                    if state.settings.show_profiling:
+                        profile_result = profile_performance(optimized_content)
+                        state.profiling_results[section_name] = profile_result
+                        
+                except Exception as e:
+                    error_msg = f"Error optimizing {section_name}: {str(e)}"
+                    log(error_msg, "ERROR")
+                    optimized_sections[section_name] = sections[section_name]  # Keep original on error
+                    
+        # Combine sections in correct order
+        return "\n\n".join(
+            optimized_sections.get(name, content)
+            for name, content in sections.items()
+        )
         
-        total = len(future_to_section)
-        for i, future in enumerate(as_completed(future_to_section)):
-            section_name = future_to_section[future]
-            try:
-                _, optimized_content = await future.result()
-                sections[section_name] = optimized_content
-                progress = (i + 1) / total
-                progress_bar.progress(progress)
-                status_text.text(f"Optimizing {section_name} ({i+1}/{total})")
-                
-                if state.settings.show_profiling:
-                    profile_result = profile_performance(optimized_content)
-                    state.profiling_results[section_name] = profile_result
-            except Exception as e:
-                log(f"Error optimizing {section_name}: {str(e)}", "ERROR")
+    except Exception as e:
+        error_msg = f"Error in optimization process: {str(e)}"
+        log(error_msg, "ERROR")
+        raise
+    finally:
+        progress_bar.empty()
+        status_text.empty()
 
-    return "\n\n".join(sections.values())
-
-# UI Components
 def display_profiling_results() -> None:
-    """Display profiling results in expandable sections"""
-    st.subheader("Performance Profiling Results")
-    for section, result in state.profiling_results.items():
-        with st.expander(f"Profiling for {section}"):
-            st.text(result)
+    """Display profiling results in expandable sections with error handling"""
+    try:
+        if not state.profiling_results:
+            st.info("No profiling results available")
+            return
+            
+        st.subheader("Performance Profiling Results")
+        for section, result in state.profiling_results.items():
+            with st.expander(f"Profiling for {section}"):
+                st.text(result)
+    except Exception as e:
+        error_msg = f"Error displaying profiling results: {str(e)}"
+        log(error_msg, "ERROR")
+        st.error(error_msg)
 
 def display_error_log() -> None:
-    """Display error log with proper formatting"""
-    if state.error_log:
+    """Display error log with proper formatting and filtering"""
+    try:
+        if not state.error_log:
+            return
+            
         st.subheader("Error Log")
         for error in state.error_log:
-            st.error(error)
+            if isinstance(error, str):
+                st.error(error)
+            else:
+                st.error(str(error))
+    except Exception as e:
+        log(f"Error displaying error log: {str(e)}", "ERROR")
 
-# Add resource management
 @contextmanager
 def manage_resources():
-    """Context manager for application resources"""
+    """Context manager for application resources with comprehensive cleanup"""
     try:
         yield
+    except Exception as e:
+        log(f"Error in resource management: {str(e)}", "ERROR")
+        raise
     finally:
-        # Cleanup resources
-        if hasattr(st.session_state, 'state'):
-            state = st.session_state.state
-            state.profiling_results.clear()
-            if hasattr(state, 'graph'):
-                state.graph.clear()
+        try:
+            if hasattr(st.session_state, 'state'):
+                state = st.session_state.state
+                state.clear()
+        except Exception as e:
+            log(f"Error during cleanup: {str(e)}", "ERROR")
 
-# Update main function
-def main() -> None:
-    """Main application entry point with proper resource management"""
-    with manage_resources(), error_boundary("main application"):
-        st.title("AutocoderAI 🧑‍💻✨")
-        
-        # Initialize state if needed
-        if 'state' not in st.session_state:
-            initialize_state()
-        
-        # Sidebar navigation
-        with st.sidebar:
-            selected = option_menu(
-                "Menu", 
-                ["Optimize", "Settings", "Logs", "Debug"] if state.settings.debug_mode else ["Optimize", "Settings", "Logs"],
-                icons=['magic', 'gear', 'journal-text', 'bug'],
-                menu_icon="cast",
-                default_index=0
-            )
-        
-        # Route to appropriate view
-        views = {
-            "Optimize": display_optimization_interface,
-            "Settings": display_settings,
-            "Logs": display_logs,
-            "Debug": display_debug_info if state.settings.debug_mode else lambda: None
-        }
-        
-        if selected in views:
-            views[selected]()
-
-if __name__ == "__main__":
-    main()
-
-# Add missing imports and improve error handling
-import asyncio
-from typing import Tuple, Callable
-import traceback
-from contextlib import contextmanager
-
-# Add error handling context manager
 @contextmanager
 def error_boundary(operation: str):
     """Context manager for consistent error handling"""
@@ -273,11 +361,10 @@ def error_boundary(operation: str):
         yield
     except Exception as e:
         error_msg = f"Error during {operation}: {str(e)}\n{traceback.format_exc()}"
-        log(error_msg, "ERROR")
+        logger.error(error_msg)
         st.error(error_msg)
         state.error_log.append(error_msg)
 
-# Add missing function definition
 async def optimize_section_async(section_name: str, content: str) -> Tuple[str, str]:
     """Optimize a single section of code asynchronously with proper error handling"""
     async def _make_api_call():
@@ -309,10 +396,10 @@ async def optimize_section_async(section_name: str, content: str) -> Tuple[str, 
                 raise ValueError("Generated code failed validation")
                 
         except asyncio.TimeoutError:
-            log(f"Timeout while optimizing section {section_name}", "WARNING")
+            logger.warning(f"Timeout while optimizing section {section_name}")
             raise
         except Exception as e:
-            log(f"API call failed: {str(e)}", "ERROR")
+            logger.error(f"API call failed: {str(e)}")
             raise
 
     for attempt in range(state.settings.max_retries):
@@ -321,13 +408,12 @@ async def optimize_section_async(section_name: str, content: str) -> Tuple[str, 
             return section_name, optimized_content
         except Exception as e:
             if attempt == state.settings.max_retries - 1:
-                log(f"All retries failed for section {section_name}: {str(e)}", "ERROR")
+                logger.error(f"All retries failed for section {section_name}: {str(e)}")
                 return section_name, content
             await asyncio.sleep(2 ** attempt)  # Exponential backoff
     
     return section_name, content
 
-# Add missing function
 def extract_sections(script: str) -> Dict[str, str]:
     """Extract logical sections from the input script"""
     try:
@@ -352,10 +438,9 @@ def extract_sections(script: str) -> Dict[str, str]:
             
         return sections
     except Exception as e:
-        log(f"Error extracting sections: {str(e)}", "ERROR")
+        logger.error(f"Error extracting sections: {str(e)}")
         return {"main": script}
 
-# Add missing UI functions
 def display_settings():
     """Display and handle settings interface"""
     with st.form("settings_form"):
@@ -367,7 +452,7 @@ def display_settings():
             with error_boundary("saving settings"):
                 state.settings.show_profiling = show_profiling
                 set_openai_creds(api_key, model)
-                st.success("Settings saved successfully!")
+                st.success("Settings applied successfully!")
 
 def display_logs():
     """Display application logs"""
@@ -411,43 +496,6 @@ def display_optimization_interface():
                 else:
                     st.warning("No optimized code to save")
 
-# Add new validation and initialization functions
-def initialize_state() -> None:
-    """Initialize application state with defaults"""
-    st.session_state.state = AppState(
-        script_sections={},
-        optimized_script="",
-        optimization_steps=[],
-        current_step=0,
-        graph=nx.DiGraph(),
-        optimization_history=[],
-        settings=Settings(
-            openai_api_key=DEFAULT_OPENAI_API_KEY,
-            model=DEFAULT_OPENAI_MODEL
-        ),
-        profiling_results={},
-        error_log=[],
-        logs=[]
-    )
-
-def validate_environment() -> bool:
-    """Validate required environment variables and dependencies"""
-    required_vars = ["OPENAI_API_KEY"]
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        log(f"Missing required environment variables: {', '.join(missing_vars)}", "ERROR")
-        return False
-    
-    try:
-        import openai
-        import streamlit
-        import networkx
-        return True
-    except ImportError as e:
-        log(f"Missing required dependency: {str(e)}", "ERROR")
-        return False
-
 def display_debug_info() -> None:
     """Display debug information when debug mode is enabled"""
     st.subheader("Debug Information")
@@ -458,3 +506,47 @@ def display_debug_info() -> None:
             "optimization_steps": len(state.optimization_steps),
             "memory_usage": psutil.Process().memory_info().rss / 1024 / 1024  # MB
         })
+
+def main():
+    """Main application entry point"""
+    if not validate_environment():
+        st.error("Environment validation failed. Please check logs.")
+        return
+
+    initialize_state()
+    
+    with st.sidebar:
+        selected = st.selectbox(
+            "Navigation",
+            ["Optimize", "Settings", "Logs", "Debug"] if state.settings.debug_mode else ["Optimize", "Settings", "Logs"]
+        )
+    
+    if selected == "Optimize":
+        display_optimization_interface()
+    elif selected == "Settings":
+        display_settings()
+    elif selected == "Logs":
+        display_logs()
+    elif selected == "Debug" and state.settings.debug_mode:
+        display_debug_info()
+
+def validate_environment() -> bool:
+    """Validate required environment variables and dependencies"""
+    required_vars = ["OPENAI_API_KEY"]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+    
+    try:
+        import openai
+        import streamlit
+        import networkx
+        return True
+    except ImportError as e:
+        logger.error(f"Missing required dependency: {str(e)}")
+        return False
+
+if __name__ == "__main__":
+    main()
