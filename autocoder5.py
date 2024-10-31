@@ -28,6 +28,7 @@ import tempfile
 from contextlib import contextmanager
 from functools import wraps
 import pickle
+from github import Github
 
 # Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
@@ -621,3 +622,30 @@ def display_dependency_graph(G: nx.DiGraph):
     except Exception as e:
         logger.error(f"Graph visualization error: {str(e)}")
         st.error("Failed to display dependency graph")
+
+# Replace local Git operations with GitHub API
+def sync_with_github(code: str, message: str):
+    """Sync code with GitHub using API"""
+    try:
+        g = Github(st.session_state.settings['github']['token'])
+        repo = g.get_repo(f"{st.session_state.settings['github']['username']}/{st.session_state.settings['github']['repo']}")
+        
+        try:
+            # Try to get existing file
+            contents = repo.get_contents("optimized_code.py")
+            repo.update_file(
+                contents.path,
+                message,
+                code,
+                contents.sha
+            )
+        except:
+            # Create new file if it doesn't exist
+            repo.create_file(
+                "optimized_code.py",
+                message,
+                code
+            )
+        st.success("Code synced with GitHub")
+    except Exception as e:
+        st.error(f"GitHub sync failed: {str(e)}")

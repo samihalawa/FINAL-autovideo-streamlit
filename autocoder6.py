@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import openai
 import sys
 from typing import Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 
 # Streamlit Page Configuration
@@ -293,17 +293,10 @@ def view_commit_history(repo: git.Repo):
 
 def format_code_with_black(code: str) -> str:
     try:
-        process = subprocess.run(
-            ['black', '-', '--quiet'],
-            input=code.encode(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True
-        )
-        formatted_code = process.stdout.decode()
-        return formatted_code
-    except subprocess.CalledProcessError as e:
-        st.error(f"Black formatting failed: {e.stderr.decode()}")
+        import black
+        return black.format_str(code, mode=black.FileMode())
+    except ImportError:
+        st.warning("Black formatter not available")
         return code
 
 # ==========================
@@ -688,20 +681,22 @@ def render_help_page():
         else:
             st.write(content)
 
-def save_session(state: State, username: str):
-    session_data = {k: getattr(state, k) for k in dir(state) if not k.startswith('__') and not callable(getattr(state, k))}
-    with open(f"{username}_session.pkl", "wb") as f:
-        pickle.dump(session_data, f)
-    st.success("Session saved successfully.")
+def save_session(state: State):
+    """Save session to Streamlit session state"""
+    session_data = {k: v for k, v in asdict(state).items() 
+                   if not k.startswith('_') and not callable(v)}
+    st.session_state['saved_session'] = session_data
+    st.success("Session saved")
 
-def load_session(state: State, username: str):
-    session_file = f"{username}_session.pkl"
-    if Path(session_file).exists():
-        with open(session_file, "rb") as f:
-            session_data = pickle.load(f)
-            for k, v in session_data.items():
-                setattr(state, k, v)
-        st.success("Session loaded successfully.")
+def load_session(state: State):
+    """Load session from Streamlit session state"""
+    if 'saved_session' in st.session_state:
+        session_data = st.session_state['saved_session']
+        for k, v in session_data.items():
+            setattr(state, k, v)
+        st.success("Session loaded")
+    else:
+        st.warning("No saved session found")
 
 shared_state = {"code_blocks": {}, "block_versions": {}, "processing_status": {}, "ordered_blocks": []}
 

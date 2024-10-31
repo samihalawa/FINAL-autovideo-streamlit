@@ -187,31 +187,17 @@ def set_openai_creds(key: str, model: str) -> None:
         raise ValueError(error_msg)
 
 def save_final_code(code: str, filename: str = "optimized_script.py") -> None:
-    """Save optimized code to file with comprehensive error handling"""
-    if not code or not isinstance(code, str):
-        raise ValueError("Invalid code input")
-        
+    """Save optimized code with Streamlit download button"""
     try:
-        # Validate code before saving
-        if not validate_input(code):
-            raise ValueError("Invalid Python syntax in optimized code")
-            
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
-        
-        # Write with error handling
-        with open(filename, "w", encoding='utf-8') as f:
-            f.write(code)
-            
-        log(f"Successfully saved optimized code to {filename}")
-        st.success(f"Saved optimized code to {filename}")
-        
-    except (IOError, OSError) as e:
-        error_msg = f"Error saving file: {str(e)}"
-        log(error_msg, "ERROR")
-        raise IOError(error_msg)
+        st.download_button(
+            label="Download Optimized Code",
+            data=code,
+            file_name=filename,
+            mime="text/plain"
+        )
+        log("Code ready for download")
     except Exception as e:
-        error_msg = f"Unexpected error saving file: {str(e)}"
+        error_msg = f"Error preparing download: {str(e)}"
         log(error_msg, "ERROR")
         raise
 

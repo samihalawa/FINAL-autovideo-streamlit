@@ -312,26 +312,42 @@ def github_integration():
     
     github_settings = st.session_state.settings['github']
     if not all([github_settings['token'], github_settings['username'], github_settings['repo']]):
-        st.warning("Please configure GitHub settings first")
+        st.warning("Please configure GitHub settings first in the Settings page")
+        if st.button("Go to Settings"):
+            st.session_state.selected_page = "Settings"
+            st.experimental_rerun()
         return
         
     try:
         g = Github(github_settings['token'])
         repo = g.get_repo(f"{github_settings['username']}/{github_settings['repo']}")
         
+        # Get files from both session state and filesystem
+        available_files = set()
+        available_files.update(st.session_state.get('app_code_storage', {}).keys())
+        if not is_streamlit_cloud():
+            available_files.update([f for f in os.listdir() if f.endswith('.py')])
+        
         files_to_sync = st.multiselect(
             "Select Files to Sync",
-            [f for f in os.listdir() if f.endswith('.py')]
+            sorted(list(available_files))
         )
         
         commit_msg = st.text_input("Commit Message", "Update from Streamlit Hub")
         
         if st.button("Sync with GitHub"):
+            if not files_to_sync:
+                st.warning("Please select files to sync")
+                return
+                
             with st.spinner("Syncing with GitHub..."):
                 try:
                     for file in files_to_sync:
-                        with open(file, 'r') as f:
-                            content = f.read()
+                        content = load_app_code(file)
+                        if content is None:
+                            st.warning(f"Skipping {file}: File not found or empty")
+                            continue
+                            
                         try:
                             # Check if file exists in repo
                             contents = repo.get_contents(file)
@@ -343,14 +359,16 @@ def github_integration():
                                 contents.sha,
                                 branch=repo.default_branch
                             )
-                        except:
-                            # Create new file
-                            repo.create_file(
-                                file,
-                                commit_msg,
-                                content,
-                                branch=repo.default_branch
-                            )
+                        except Exception as e:
+                            if "404" in str(e):  # File doesn't exist
+                                repo.create_file(
+                                    file,
+                                    commit_msg,
+                                    content,
+                                    branch=repo.default_branch
+                                )
+                            else:
+                                raise
                     st.success("Successfully synced all files to GitHub!")
                 except Exception as e:
                     st.error(f"Error during sync: {str(e)}")
@@ -802,19 +820,17 @@ def validate_github_response(response):
 
 # Add missing save_app_code function that's called but not defined
 def save_app_code(file_name: str, content: str) -> bool:
-    """Save app code to both session state and file system"""
+    """Save app code with cloud compatibility"""
     try:
-        # Save to session state
+        # Always save to session state
         if 'app_code_storage' not in st.session_state:
             st.session_state.app_code_storage = {}
         st.session_state.app_code_storage[file_name] = content
         
-        # Save to file system if not on Streamlit Cloud
+        # Only write to filesystem if not on cloud
         if not is_streamlit_cloud():
-            lock_path = f"{file_name}.lock"
-            with FileLock(lock_path):
-                with open(file_name, 'w') as f:
-                    f.write(content)
+            with open(file_name, 'w', encoding='utf-8') as f:
+                f.write(content)
         return True
     except Exception as e:
         logger.error(f"Error saving app code: {str(e)}")
@@ -866,11 +882,20 @@ def main():
 
 # Add missing show_apps_page function
 def show_apps_page():
-    """Display apps management page"""
+    """Display apps management page with cloud compatibility"""
     st.title("Manage Apps")
     
-    # Get available apps
-    apps = [f for f in os.listdir() if f.endswith('.py') and f != 'streamlit_app.py']
+    # Get available apps from both session state and filesystem
+    apps = set()
+    
+    # Add apps from session state
+    apps.update(st.session_state.get('app_code_storage', {}).keys())
+    
+    # Add apps from filesystem if not on cloud
+    if not is_streamlit_cloud():
+        apps.update([f for f in os.listdir() if f.endswith('.py') and f != 'streamlit_app.py'])
+    
+    apps = sorted(list(apps))
     
     if not apps:
         st.info("No apps found. Create a new app to get started!")
@@ -887,7 +912,14 @@ def show_apps_page():
         with col3:
             if st.button("Delete", key=f"delete_{app}"):
                 try:
-                    os.remove(app)
+                    # Remove from session state
+                    if app in st.session_state.get('app_code_storage', {}):
+                        del st.session_state.app_code_storage[app]
+                    
+                    # Remove from filesystem if not on cloud
+                    if not is_streamlit_cloud() and os.path.exists(app):
+                        os.remove(app)
+                        
                     st.success(f"Deleted {app}")
                     time.sleep(1)
                     st.experimental_rerun()
@@ -944,6 +976,47 @@ def clear_all_data():
     except Exception as e:
         logger.error(f"Clear data error: {str(e)}")
         return False
+
+# Add missing initialize_app function that's referenced in main()
+def initialize_app():
+    """Initialize the application state and dependencies"""
+    try:
+        # Setup logging
+        setup_logging()
+        
+        # Initialize session state
+        initialize_session_state()
+        
+        # Ensure required directories exist
+        os.makedirs('apps', exist_ok=True)
+        os.makedirs('templates', exist_ok=True)
+        
+        return True
+    except Exception as e:
+        logger.error(f"App initialization failed: {str(e)}")
+        return False
+
+# Fix file reading for Streamlit Cloud
+def load_app_code(file_name: str) -> str:
+    """Load app code with cloud compatibility"""
+    try:
+        # Try session state first
+        if file_name in st.session_state.get('app_code_storage', {}):
+            return st.session_state.app_code_storage[file_name]
+        
+        # Fallback to file system if not on cloud
+        if not is_streamlit_cloud():
+            with open(file_name, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Cache in session state
+                if 'app_code_storage' not in st.session_state:
+                    st.session_state.app_code_storage = {}
+                st.session_state.app_code_storage[file_name] = content
+                return content
+        return None
+    except Exception as e:
+        logger.error(f"Error loading app code: {str(e)}")
+        return None
 
 if __name__ == "__main__":
     try:
