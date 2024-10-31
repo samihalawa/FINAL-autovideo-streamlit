@@ -7,15 +7,16 @@ import re
 import streamlit as st
 import openai
 import networkx as nx
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Tuple, Callable
 from difflib import unified_diff
 import time
+import logging
+import traceback
 from streamlit_ace import st_ace
 from streamlit_agraph import agraph, Node, Edge, Config
 from aider.io import InputOutput
 from aider import models, chat
 from aider.coders import Coder
-import subprocess
 import concurrent.futures
 import plotly.graph_objects as go
 from openai import OpenAI

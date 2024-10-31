@@ -1,5 +1,4 @@
-#!pip install aider langchain streamlit streamlit-ace streamlit-modal streamlit-sortables
-# AI Code Enhancer Streamlit App
+# AI Code Enhancer Streamlit App with Cloud Optimizations
 # ==========================
 # Imports and Configuration
 # ==========================
