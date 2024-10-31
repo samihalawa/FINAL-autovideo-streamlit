@@ -310,15 +310,14 @@ def manage_dependencies():
 def github_integration():
     st.subheader("GitHub Integration")
     
-    token = st.session_state.get('GITHUB_TOKEN')
-    if not token:
-        st.warning("Please enter GitHub token in settings first")
+    github_settings = st.session_state.settings['github']
+    if not all([github_settings['token'], github_settings['username'], github_settings['repo']]):
+        st.warning("Please configure GitHub settings first")
         return
         
     try:
-        g = Github(token)
-        repo_name = f"{st.session_state.get('GITHUB_USERNAME')}/{st.session_state.get('GITHUB_REPO')}"
-        repo = g.get_repo(repo_name)
+        g = Github(github_settings['token'])
+        repo = g.get_repo(f"{github_settings['username']}/{github_settings['repo']}")
         
         files_to_sync = st.multiselect(
             "Select Files to Sync",
@@ -355,10 +354,9 @@ def github_integration():
                     st.success("Successfully synced all files to GitHub!")
                 except Exception as e:
                     st.error(f"Error during sync: {str(e)}")
-                    st.exception(e)
+                    
     except Exception as e:
         st.error(f"GitHub Error: {str(e)}")
-        st.exception(e)
 
 def update_requirements(template):
     template_requirements = {
@@ -477,14 +475,13 @@ def search_apps(apps, query):
 def clone_app(original_path, new_name):
     """Clone an existing app"""
     try:
-        new_file_name = f"{new_name.lower().replace(' ', '_')}.py"
-        new_path = os.path.join(os.getcwd(), new_file_name)
+        new_path = f"{new_name.lower().replace(' ', '_')}.py"
         if os.path.exists(new_path):
             return False, "App already exists"
         
         with open(original_path, 'r') as src, open(new_path, 'w') as dst:
             dst.write(src.read())
-        return True, f"Created {new_file_name}"
+        return True, f"Created {new_path}"
     except Exception as e:
         return False, str(e)
 
@@ -597,90 +594,37 @@ def settings_page():
     """Settings configuration page"""
     st.title("Settings")
     
-    # Default settings without hardcoded token
-    default_settings = {
-        'GITHUB_USERNAME': os.getenv('GITHUB_USERNAME', ''),
-        'GITHUB_REPO': os.getenv('GITHUB_REPO', ''),
-        'GITHUB_TOKEN': os.getenv('GITHUB_TOKEN', ''),
-        'auto_save': True,
-        'show_previews': True,
-        'dark_mode': False
-    }
+    # Create tabs for different settings categories
+    general_tab, github_tab, advanced_tab = st.tabs(["General", "GitHub", "Advanced"])
     
-    # Load current settings from session state or defaults
-    current_settings = {
-        key: st.session_state.get(key, default_settings[key])
-        for key in default_settings
-    }
-
-    tab1, tab2 = st.tabs(["General", "GitHub"])
-    
-    with tab1:
+    with general_tab:
         st.markdown("### General Settings")
-        current_settings['auto_save'] = st.checkbox(
-            "Auto Save", 
-            value=current_settings['auto_save']
-        )
-        current_settings['show_previews'] = st.checkbox(
-            "Show Code Previews", 
-            value=current_settings['show_previews']
-        )
-        current_settings['dark_mode'] = st.checkbox(
-            "Dark Mode", 
-            value=current_settings['dark_mode']
-        )
+        settings = st.session_state.settings
         
-    with tab2:
-        st.markdown("### GitHub Settings")
+        # UI Preferences
+        settings['auto_save'] = st.toggle("Auto Save", settings.get('auto_save', True))
+        settings['show_previews'] = st.toggle("Show Code Previews", settings.get('show_previews', True))
+        settings['dark_mode'] = st.toggle("Dark Mode", settings.get('dark_mode', False))
         
-        # GitHub configuration with help text
-        st.info("These settings are required for GitHub integration. Values will be saved as environment variables.")
+    with github_tab:
+        st.markdown("### GitHub Integration")
+        github_settings = settings.get('github', {})
         
-        current_settings['GITHUB_USERNAME'] = st.text_input(
-            "GitHub Username",
-            value=current_settings['GITHUB_USERNAME'],
-            help="Your GitHub username"
-        )
-        current_settings['GITHUB_REPO'] = st.text_input(
-            "GitHub Repository",
-            value=current_settings['GITHUB_REPO'],
-            help="The name of your GitHub repository"
-        )
-        current_settings['GITHUB_TOKEN'] = st.text_input(
-            "GitHub Token",
-            value="",  # Do not display the token
-            type="password",
-            help="Your GitHub Personal Access Token"
-        )
+        github_settings['username'] = st.text_input("GitHub Username", github_settings.get('username', ''))
+        github_settings['repo'] = st.text_input("GitHub Repository", github_settings.get('repo', ''))
+        github_settings['token'] = st.text_input("GitHub Token", github_settings.get('token', ''), type="password")
         
-        # Add link to GitHub token creation
-        st.markdown("""
-        [Create a new GitHub token here](https://github.com/settings/tokens/new)
-        > Required scopes: `repo`, `workflow`
-        """)
-        
-        # Test GitHub connection
-        if st.button("Test GitHub Connection"):
-            try:
-                g = Github(current_settings['GITHUB_TOKEN'])
-                repo = g.get_repo(f"{current_settings['GITHUB_USERNAME']}/{current_settings['GITHUB_REPO']}")
-                st.success(f"Successfully connected to {repo.full_name}")
-            except Exception as e:
-                st.error(f"GitHub connection failed: {str(e)}")
-                st.exception(e)
+        if st.button("Test Connection"):
+            test_github_connection(github_settings)
     
-    # Save button for all settings
-    if st.button("Save Settings", type="primary"):
-        save_settings(current_settings)
-        st.success("Settings saved successfully!")
-        time.sleep(1)
-        st.experimental_rerun()
-
-    # Show current configuration
-    with st.expander("Current Configuration"):
-        safe_settings = current_settings.copy()
-        safe_settings['GITHUB_TOKEN'] = '****' if safe_settings['GITHUB_TOKEN'] else 'Not set'
-        st.json(safe_settings)
+    with advanced_tab:
+        st.markdown("### Advanced Settings")
+        if st.button("Clear All Data"):
+            if st.checkbox("I understand this will delete all apps and settings"):
+                clear_all_data()
+                st.success("All data cleared! Restarting app...")
+                time.sleep(2)
+                st.experimental_rerun()
 
 def get_github_config():
     """Get GitHub configuration from environment variables or session state"""
@@ -922,342 +866,83 @@ def main():
 
 # Add missing show_apps_page function
 def show_apps_page():
-    """Apps management page with search and actions"""
+    """Display apps management page"""
     st.title("Manage Apps")
     
-    # Search and filter
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        search_query = st.text_input("🔍 Search Apps", st.session_state.get('search_query', ''))
-    with col2:
-        sort_by = st.selectbox("Sort by", ["Name", "Last Modified", "Size"])
-    
-    # Get and filter apps
-    apps = get_available_apps(search_query, sort_by)
+    # Get available apps
+    apps = [f for f in os.listdir() if f.endswith('.py') and f != 'streamlit_app.py']
     
     if not apps:
         st.info("No apps found. Create a new app to get started!")
         return
-    
-    # Display apps in grid
-    for idx in range(0, len(apps), 3):
-        cols = st.columns(3)
-        for col_idx, app in enumerate(apps[idx:min(idx+3, len(apps))]):
-            with cols[col_idx]:
-                display_app_card(app)
-
-def display_app_card(app):
-    """Display individual app card with actions"""
-    st.markdown(f"### {app['name']}")
-    metadata = get_app_metadata(app['path'])
-    
-    st.markdown(f"""
-        - Last modified: {metadata.get('modified', 'N/A')}
-        - Size: {metadata.get('size', 'N/A')}
-        - Lines: {metadata.get('lines', 'N/A')}
-    """)
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("▶️ Run", key=f"run_{app['name']}"):
-            st.session_state.current_app = app['path']
-            st.experimental_rerun()
-    with col2:
-        if st.button("✏️ Edit", key=f"edit_{app['name']}"):
-            show_app_preview(app['path'], with_edit=True)
-    with col3:
-        if st.button("🗑️ Delete", key=f"delete_{app['name']}"):
-            delete_app(app['path'])
-            st.experimental_rerun()
-
-def sync_page():
-    """GitHub synchronization page"""
-    st.title("Sync with GitHub")
-    
-    if not validate_github_settings():
-        st.warning("Please configure GitHub settings first")
-        return
-    
-    # Get repository status
-    repo_status = get_repo_status()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("### Local Changes")
-        local_changes = repo_status['local_changes']
-        if local_changes:
-            for file, status in local_changes.items():
-                st.checkbox(f"{file} ({status})", key=f"sync_{file}")
-        else:
-            st.info("No local changes detected")
-    
-    with col2:
-        st.markdown("### Remote Changes")
-        remote_changes = repo_status['remote_changes']
-        if remote_changes:
-            for file, status in remote_changes.items():
-                st.checkbox(f"{file} ({status})", key=f"pull_{file}")
-        else:
-            st.info("No remote changes detected")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Push Selected"):
-            push_selected_changes()
-    with col2:
-        if st.button("Pull Selected"):
-            pull_selected_changes()
-
-def dependencies_page():
-    """Package management page"""
-    st.title("Manage Dependencies")
-    
-    # Core dependencies that can't be removed
-    core_deps = {
-        "streamlit",
-        "streamlit-ace",
-        "streamlit-option-menu",
-        "PyGithub",
-        "python-dotenv"
-    }
-    
-    col1, col2 = st.columns([2,1])
-    
-    with col1:
-        st.markdown("### Current Dependencies")
-        current_reqs = load_requirements()
-        new_reqs = st_ace(
-            value=current_reqs,
-            language="text",
-            theme="monokai",
-            height=300
-        )
-    
-    with col2:
-        st.markdown("### Quick Add")
-        common_packages = ["pandas", "numpy", "scikit-learn", "plotly", "matplotlib"]
-        for package in common_packages:
-            if st.button(f"Add {package}"):
-                add_package(package, new_reqs)
         
-        st.markdown("### Actions")
-        if st.button("Save Changes"):
-            save_requirements(new_reqs, core_deps)
-        if st.button("Install All"):
-            install_requirements()
+    for app in apps:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.markdown(f"### {app}")
+        with col2:
+            if st.button("Run", key=f"run_{app}"):
+                st.session_state.current_app = app
+                st.experimental_rerun()
+        with col3:
+            if st.button("Delete", key=f"delete_{app}"):
+                try:
+                    os.remove(app)
+                    st.success(f"Deleted {app}")
+                    time.sleep(1)
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Error deleting {app}: {str(e)}")
 
-def save_github_token(token: str):
-    # Use environment variable or secure storage service
-    key = Fernet.generate_key()
-    f = Fernet(key)
-    encrypted_token = f.encrypt(token.encode())
-    st.session_state['gh_token_encrypted'] = encrypted_token
-
-def validate_app_name(name: str) -> bool:
-    pattern = r'^[a-zA-Z0-9_-]+$'
-    return bool(re.match(pattern, name))
-
-def get_available_apps(search_query: str = "", sort_by: str = "Name") -> List[dict]:
-    """Get list of available apps with optional filtering and sorting"""
-    apps = []
+# Add missing cleanup function referenced earlier
+def cleanup_failed_app():
+    """Cleanup after app failure"""
     try:
-        # Get all Python files in directory
-        for file in os.listdir():
-            if file.endswith('.py') and file != 'streamlit_app.py':
-                app_info = {
-                    'name': file.replace('.py', '').replace('_', ' ').title(),
-                    'path': file,
-                    'metadata': get_app_metadata(file)
-                }
-                apps.append(app_info)
-        
-        # Apply search filter
-        if search_query:
-            apps = [app for app in apps if search_query.lower() in app['name'].lower()]
-        
-        # Apply sorting
-        if sort_by == "Name":
-            apps.sort(key=lambda x: x['name'])
-        elif sort_by == "Last Modified":
-            apps.sort(key=lambda x: x['metadata'].get('modified', ''), reverse=True)
-        elif sort_by == "Size":
-            apps.sort(key=lambda x: float(x['metadata'].get('size', '0').split()[0]), reverse=True)
-            
-        return apps
+        if 'current_app' in st.session_state:
+            del st.session_state['current_app']
+        # Clean up any temporary files
+        for f in glob.glob("*.tmp"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
     except Exception as e:
-        logger.error(f"Error getting apps: {str(e)}")
-        return []
+        logger.error(f"Cleanup error: {str(e)}")
 
-def delete_app(file_path: str) -> bool:
-    """Delete an app and clean up associated resources"""
+# Add missing test_github_connection function
+def test_github_connection(github_settings):
+    """Test GitHub connection and permissions"""
     try:
-        # Remove from session state
-        if file_path in st.session_state.app_code_storage:
-            del st.session_state.app_code_storage[file_path]
-        
-        # Remove from file system
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            
-        # Clean up any associated temporary files
-        temp_path = f"{file_path}.tmp"
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-            
-        return True
-    except Exception as e:
-        logger.error(f"Error deleting app {file_path}: {str(e)}")
-        return False
-
-def validate_github_settings() -> bool:
-    """Validate GitHub configuration settings"""
-    github_settings = st.session_state.settings.get('github', {})
-    required_fields = ['username', 'repo', 'token']
-    
-    # Check all required fields are present and non-empty
-    if not all(github_settings.get(field) for field in required_fields):
-        return False
-        
-    try:
-        # Test GitHub connection
         g = Github(github_settings['token'])
         repo = g.get_repo(f"{github_settings['username']}/{github_settings['repo']}")
-        # Try to access repo (will raise exception if invalid)
+        # Test basic operations
         repo.get_contents("")
+        st.success("GitHub connection successful!")
         return True
     except Exception as e:
-        logger.error(f"GitHub validation error: {str(e)}")
+        st.error(f"GitHub connection failed: {str(e)}")
         return False
 
-def get_repo_status() -> dict:
-    """Get status of local and remote repository changes"""
-    status = {
-        'local_changes': {},
-        'remote_changes': {}
-    }
-    
+# Add missing clear_all_data function
+def clear_all_data():
+    """Clear all application data and settings"""
     try:
-        github_settings = st.session_state.settings['github']
-        g = Github(github_settings['token'])
-        repo = g.get_repo(f"{github_settings['username']}/{github_settings['repo']}")
+        # Clear session state
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         
-        # Get remote files
-        remote_files = {
-            content.path: content.sha 
-            for content in repo.get_contents("")
-            if content.path.endswith('.py')
-        }
-        
-        # Compare local files
-        for file in os.listdir():
-            if not file.endswith('.py'):
-                continue
+        # Clear temporary files
+        for f in glob.glob("*.tmp"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
                 
-            with open(file, 'r') as f:
-                content = f.read()
-                
-            if file in remote_files:
-                # File exists in remote
-                remote_content = repo.get_contents(file).decoded_content.decode()
-                if content != remote_content:
-                    status['local_changes'][file] = 'modified'
-            else:
-                status['local_changes'][file] = 'new'
-                
-        # Check for remote files not present locally
-        for remote_file in remote_files:
-            if not os.path.exists(remote_file):
-                status['remote_changes'][remote_file] = 'deleted_locally'
-                
-        return status
-    except Exception as e:
-        logger.error(f"Error getting repo status: {str(e)}")
-        return status
-
-def push_selected_changes():
-    """Push selected local changes to GitHub"""
-    try:
-        # Get selected files from session state
-        selected = [
-            key.replace('sync_', '') 
-            for key in st.session_state.keys() 
-            if key.startswith('sync_') and st.session_state[key]
-        ]
-        
-        if not selected:
-            st.warning("No files selected for push")
-            return
-            
-        github_manager = GitHubManager()
-        commit_msg = st.session_state.get('commit_message', 'Update from Streamlit Hub')
-        
-        if github_manager.sync_files(selected, commit_msg):
-            st.success("Successfully pushed changes to GitHub")
-        else:
-            st.error("Failed to push changes")
-    except Exception as e:
-        st.error(f"Error pushing changes: {str(e)}")
-
-def pull_selected_changes():
-    """Pull selected remote changes from GitHub"""
-    try:
-        # Get selected files from session state
-        selected = [
-            key.replace('pull_', '') 
-            for key in st.session_state.keys() 
-            if key.startswith('pull_') and st.session_state[key]
-        ]
-        
-        if not selected:
-            st.warning("No files selected for pull")
-            return
-            
-        github_settings = st.session_state.settings['github']
-        g = Github(github_settings['token'])
-        repo = g.get_repo(f"{github_settings['username']}/{github_settings['repo']}")
-        
-        for file in selected:
-            content = repo.get_contents(file)
-            with open(file, 'w') as f:
-                f.write(content.decoded_content.decode())
-                
-        st.success("Successfully pulled changes from GitHub")
-    except Exception as e:
-        st.error(f"Error pulling changes: {str(e)}")
-
-def load_requirements() -> str:
-    """Load current requirements from requirements.txt"""
-    try:
-        if os.path.exists('requirements.txt'):
-            with open('requirements.txt', 'r') as f:
-                return f.read()
-        return ""
-    except Exception as e:
-        logger.error(f"Error loading requirements: {str(e)}")
-        return ""
-
-def add_package(package: str, current_reqs: str) -> str:
-    """Add a package to requirements if not already present"""
-    try:
-        requirements = set(current_reqs.split('\n'))
-        if package not in requirements:
-            requirements.add(package)
-        return '\n'.join(sorted(requirements))
-    except Exception as e:
-        logger.error(f"Error adding package: {str(e)}")
-        return current_reqs
-
-# Fix initialization order and add error handling
-def initialize_app():
-    """Initialize application with proper error handling"""
-    try:
-        setup_logging()
-        load_dotenv(override=True)
+        # Reset settings to defaults
         initialize_session_state()
         return True
     except Exception as e:
-        st.error(f"Failed to initialize app: {str(e)}")
-        logger.error(f"Initialization error: {str(e)}")
+        logger.error(f"Clear data error: {str(e)}")
         return False
 
 if __name__ == "__main__":

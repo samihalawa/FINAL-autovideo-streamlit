@@ -26,22 +26,43 @@ from streamlit_folium import folium_static
 import folium
 import plotly.graph_objects as go
 import json
+import functools
 
 # 1. Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
 DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_API_KEY = "gpt-4o-mini", os.environ.get("OPENAI_API_KEY", "")
 
-# 2. Initialize session state
-def init_session_state():
-    defaults = {
-        'script_sections': {}, 'optimized_sections': {}, 'final_script': "", 'progress': 0, 'logs': [],
-        'function_list': [], 'current_function_index': 0, 'openai_api_key': DEFAULT_OPENAI_API_KEY,
-        'openai_model': DEFAULT_OPENAI_MODEL, 'openai_endpoint': "https://api.openai.com/v1",
-        'script_map': None, 'optimization_status': {}, 'error_log': [],
+class StateManager:
+    """Centralized state management for AutocoderAI"""
+    
+    DEFAULT_STATE = {
+        'script_sections': {}, 
+        'optimized_sections': {}, 
+        'final_script': "",
+        'progress': 0,
+        'logs': [],
+        'function_list': [],
+        'current_function_index': 0,
+        'openai_api_key': DEFAULT_OPENAI_API_KEY,
+        'openai_model': DEFAULT_OPENAI_MODEL,
+        'openai_endpoint': "https://api.openai.com/v1",
+        'script_map': None,
+        'optimization_status': {},
+        'error_log': [],
     }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+
+    @staticmethod
+    def init_state():
+        """Initialize all session state variables"""
+        for k, v in StateManager.DEFAULT_STATE.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
+
+    @staticmethod
+    def update_state(key: str, value: Any) -> None:
+        """Thread-safe state update"""
+        with st.session_state._lock:  # Use Streamlit's built-in lock
+            st.session_state[key] = value
 
 # 3. Log with timestamp
 def log(msg: str): st.session_state['logs'].append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
@@ -233,7 +254,7 @@ def main_interface():
     
     with col1:
         st.subheader("📝 Script Input")
-        script_input = st_ace(placeholder="Paste your Python script here...", language="python", theme="monokai", keybinding="vscode", font_size=14, min_lines=20, key="ace_editor")
+        script_input = UIComponents.display_script_input()
         
         if st.button("🚀 Optimize Script", key="optimize_button"):
             if not script_input.strip():
@@ -245,10 +266,11 @@ def main_interface():
                 return
             
             with st.spinner("Analyzing and optimizing script..."):
-                st.session_state['script_sections'] = extract_sections(script_input)
+                analysis = CacheManager.get_script_analysis(script_input)
+                StateManager.update_state('script_sections', analysis)
                 optimize_sections(aider_chat.coder)
-                st.session_state['final_script'] = assemble_script()
-                st.session_state['script_map'] = gen_script_map()
+                StateManager.update_state('final_script', assemble_script())
+                StateManager.update_state('script_map', gen_script_map())
             
             st.success("Script optimization completed!")
     
@@ -646,3 +668,51 @@ def display_dependency_graph(graph: nx.DiGraph):
     
     fig.update_layout(title_text="Function Dependencies", font_size=10)
     st.plotly_chart(fig, use_container_width=True)
+
+def error_boundary(func):
+    """Decorator to standardize error handling"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            error_msg = f"Error in {func.__name__}: {str(e)}"
+            st.error(error_msg)
+            log(error_msg)
+            return None
+    return wrapper
+
+class UIComponents:
+    """Centralized UI component management"""
+    
+    @staticmethod
+    def display_script_input() -> str:
+        return st_ace(
+            placeholder="Paste your Python script here...",
+            language="python",
+            theme="monokai",
+            keybinding="vscode",
+            font_size=14,
+            min_lines=20,
+            key="ace_editor"
+        )
+
+    @staticmethod
+    def display_optimization_status():
+        with st.sidebar:
+            st.subheader("Optimization Status")
+            for section, status in st.session_state['optimization_status'].items():
+                st.text(f"{section}: {status}")
+
+class CacheManager:
+    """Centralized cache management"""
+    
+    @staticmethod
+    @st.cache(ttl=3600, allow_output_mutation=True)
+    def get_openai_response(prompt: str):
+        return cached_openai_call(prompt)
+    
+    @staticmethod
+    @st.cache(ttl=3600)
+    def get_script_analysis(script: str):
+        return extract_sections(script)

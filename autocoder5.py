@@ -21,24 +21,59 @@ import plotly.graph_objects as go
 from openai import OpenAI
 import json
 from autocoder import State, optimize_script, validate_api_key, save_final_code, generate_optimization_suggestion
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple, Callable
+from pathlib import Path
+import tempfile
+from contextlib import contextmanager
+from functools import wraps
+import pickle
 
 # Configuration
 st.set_page_config(page_title="AutocoderAI", layout="wide")
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Initialize session state
 def init_session_state():
-    defaults = {
-        'script_sections': {}, 'optimized_sections': {}, 'final_script': "",
-        'progress': 0, 'logs': [], 'function_list': [], 'current_function_index': 0,
-        'openai_api_key': DEFAULT_OPENAI_API_KEY, 'openai_model': DEFAULT_OPENAI_MODEL,
-        'openai_endpoint': "https://api.openai.com/v1", 'script_map': None,
-        'optimization_status': {}, 'error_log': [], 'chat_history': [],
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    """Initialize session state with proper error handling"""
+    try:
+        defaults = {
+            'script_sections': {}, 
+            'optimized_sections': {}, 
+            'final_script': "",
+            'progress': 0, 
+            'logs': [], 
+            'function_list': [], 
+            'current_function_index': 0,
+            'openai_api_key': DEFAULT_OPENAI_API_KEY,
+            'openai_model': DEFAULT_OPENAI_MODEL,
+            'openai_endpoint': "https://api.openai.com/v1",
+            'script_map': None,
+            'optimization_status': {},
+            'error_log': [],
+            'chat_history': [],
+            'state': State()
+        }
+        
+        for k, v in defaults.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
+                
+        # Validate critical settings
+        if not st.session_state['openai_api_key']:
+            logger.warning("OpenAI API key not set")
+            
+    except Exception as e:
+        logger.error(f"Session state initialization error: {str(e)}")
+        raise
 
 # Logging function
 def log(msg: str):
@@ -267,36 +302,149 @@ def save_final_code(code: str, filename: str = "optimized_script.py"):
         f.write(code)
     st.success(f"Saved optimized code to {filename}")
 
-# Main interface
+# Add error handling decorator
+def error_handler(func: Callable):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in {func.__name__}: {str(e)}\n{traceback.format_exc()}")
+            st.error(f"An error occurred in {func.__name__}. Check logs for details.")
+            return None
+    return wrapper
+
+# Add context manager for temporary files
+@contextmanager
+def temp_file_manager():
+    temp_files = []
+    try:
+        yield temp_files
+    finally:
+        for file in temp_files:
+            try:
+                Path(file).unlink(missing_ok=True)
+            except Exception as e:
+                logger.error(f"Failed to delete temp file {file}: {e}")
+
+# Add authentication class
+class Authentication:
+    def __init__(self):
+        self.max_attempts = 3
+        self.attempt_count = 0
+        
+    def validate_credentials(self, username: str, password: str) -> bool:
+        # In production, replace with secure authentication
+        return username == "admin" and password == "admin"
+    
+    @error_handler
+    def authenticate(self) -> Tuple[bool, Optional[str]]:
+        if 'authentication_status' not in st.session_state:
+            st.session_state['authentication_status'] = False
+
+        if not st.session_state['authentication_status']:
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            
+            if st.button("Login"):
+                if self.validate_credentials(username, password):
+                    st.session_state['authentication_status'] = True
+                    st.session_state['username'] = username
+                    return True, username
+                else:
+                    self.attempt_count += 1
+                    if self.attempt_count >= self.max_attempts:
+                        st.error("Maximum login attempts exceeded. Please try again later.")
+                        time.sleep(30)  # Add delay after max attempts
+                    else:
+                        st.error("Invalid credentials")
+                    return False, None
+            return False, None
+        
+        return True, st.session_state.get('username')
+
+# Add session management class
+class SessionManager:
+    def __init__(self, state: State):
+        self.state = state
+        self.session_dir = Path("sessions")
+        self.session_dir.mkdir(exist_ok=True)
+    
+    @error_handler
+    def save_session(self, username: str):
+        session_data = {
+            k: getattr(self.state, k) 
+            for k in dir(self.state) 
+            if not k.startswith('__') and not callable(getattr(self.state, k))
+        }
+        session_file = self.session_dir / f"{username}_session.pkl"
+        with open(session_file, "wb") as f:
+            pickle.dump(session_data, f)
+        st.success("Session saved successfully.")
+    
+    @error_handler
+    def load_session(self, username: str):
+        session_file = self.session_dir / f"{username}_session.pkl"
+        if session_file.exists():
+            with open(session_file, "rb") as f:
+                session_data = pickle.load(f)
+                for k, v in session_data.items():
+                    setattr(self.state, k, v)
+            st.success("Session loaded successfully.")
+        else:
+            st.warning("No saved session found.")
+
+# Add code optimization class
+class CodeOptimizer:
+    def __init__(self, api_key: str, model: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+    
+    @error_handler
+    def optimize_code(self, code: str, optimization_type: str = "standard") -> Optional[str]:
+        if not code.strip():
+            raise ValueError("Empty code provided")
+        
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "You are a Python code optimization expert."},
+                {"role": "user", "content": f"Optimize this Python code ({optimization_type} optimization):\n\n{code}"}
+            ],
+            temperature=0.7,
+            max_tokens=2000
+        )
+        
+        return response.choices[0].message.content
+
+# Update main interface
 def main_interface(coder: Coder):
     tabs = st.tabs(["Code Input", "Optimization", "Results"])
     
     with tabs[0]:
-        script_input = st_ace(
-            placeholder="Paste your Python script here...",
-            language="python",
-            theme="monokai",
-            keybinding="vscode",
-            font_size=14,
-            min_lines=20,
-            key="ace_editor"
-        )
+        with st.form("code_input_form"):
+            script_input = render_code_editor()
+            submit_button = st.form_submit_button("Submit Code")
+            
+            if submit_button and script_input.strip():
+                st.session_state['script_sections'] = extract_sections(script_input)
+                st.success("Code submitted successfully!")
 
     with tabs[1]:
-        if st.button("🚀 Optimize Script"):
-            if not script_input.strip():
-                st.error("Please enter code first")
-                return
-                
+        if st.button("🚀 Optimize Script") and 'script_sections' in st.session_state:
             with st.spinner("Optimizing..."):
                 try:
-                    st.session_state['script_sections'] = extract_sections(script_input)
-                    optimized = optimize_script(script_input, "standard")
-                    st.session_state['final_script'] = optimized
-                    st.success("Optimization complete!")
+                    optimizer = CodeOptimizer(
+                        st.session_state['openai_api_key'],
+                        st.session_state['openai_model']
+                    )
+                    optimized = optimizer.optimize_code(script_input)
+                    if optimized:
+                        st.session_state['final_script'] = optimized
+                        st.success("Optimization complete!")
                 except Exception as e:
                     st.error(f"Optimization failed: {str(e)}")
-                    log(f"Error: {str(e)}")
+                    logger.error(f"Optimization error: {str(e)}\n{traceback.format_exc()}")
 
     with tabs[2]:
         if st.session_state.get('final_script'):
@@ -310,62 +458,42 @@ def main_interface(coder: Coder):
                         st.session_state['script_sections'].get('function_definitions', {})
                     ))
 
-# Sidebar settings
-def sidebar_settings(coder: Coder):
-    st.sidebar.header("⚙️ Settings")
-    
-    api_key = st.sidebar.text_input(
-        "OpenAI API Key",
-        value=st.session_state['openai_api_key'],
-        type="password",
-        help="Enter your OpenAI API key."
-    )
-    model = st.sidebar.selectbox(
-        "OpenAI Model",
-        ["gpt-3.5-turbo", "gpt-4", "gpt-4-0613", "gpt-4-32k"],
-        index=2,
-        help="Select the OpenAI model to use."
-    )
-    endpoint = st.sidebar.text_input(
-        "OpenAI Endpoint",
-        value=st.session_state['openai_endpoint'],
-        help="Enter the OpenAI API endpoint."
-    )
-    
-    if st.sidebar.button("Apply Settings"):
-        if validate_api_key(api_key):
-            set_openai_creds(api_key, model, endpoint)
-        else:
-            st.sidebar.error("Invalid API Key")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔄 Optimization Status")
-    if st.session_state['optimization_status']:
-        for section, status in st.session_state['optimization_status'].items():
-            st.sidebar.text(f"{section}: {status}")
-    else:
-        st.sidebar.info("No optimization tasks yet.")
-
-# Initialize Aider components
-def initialize_aider() -> Coder:
-    io = InputOutput()
-    model = models.Model.create("gpt-4")
-    coder = Coder.create(main_model=model)
-    aider_chat = chat.Chat(io=io, coder=coder)
-    return coder
-
-# Run app
+# Update run_app function
 def run_app():
+    """Main application runner with comprehensive error handling"""
     try:
+        auth = Authentication()
+        auth_status, username = auth.authenticate()
+        if not auth_status:
+            return
+
+        st.title("AutocoderAI - Code Optimization")
+        
         init_session_state()
+        
+        if not validate_api_key(st.session_state['openai_api_key']):
+            st.warning("Please enter a valid OpenAI API key in settings")
+            return
+            
+        session_manager = SessionManager(st.session_state['state'])
+        
+        with st.sidebar:
+            if st.button("Save Session"):
+                session_manager.save_session(username)
+            if st.button("Load Session"):
+                session_manager.load_session(username)
+            
         coder = initialize_aider()
         sidebar_settings(coder)
         main_interface(coder)
+        
     except Exception as e:
-        st.error(f"An unexpected error occurred: {str(e)}")
-        log(f"Unexpected Error: {str(e)}")
+        logger.error(f"Application error: {str(e)}\n{traceback.format_exc()}")
+        st.error("An unexpected error occurred. Please check the logs for details.")
+        
+        with st.expander("Technical Details"):
+            st.code(traceback.format_exc())
 
-# Main execution
 if __name__ == "__main__":
     run_app()
 
@@ -403,3 +531,93 @@ def render_optimization_controls():
     if st.sidebar.button("Apply Settings"):
         state.settings.update(optimization_options)
         st.success("Settings updated!")
+
+def optimize_script(script: str, optimization_type: str) -> str:
+    try:
+        if not script.strip():
+            raise ValueError("Empty script provided")
+            
+        # Initialize OpenAI client with error handling
+        client = OpenAI(api_key=st.session_state.get('openai_api_key'))
+        if not client:
+            raise ValueError("Failed to initialize OpenAI client")
+            
+        # Perform optimization
+        response = client.chat.completions.create(
+            model=st.session_state.get('openai_model', DEFAULT_OPENAI_MODEL),
+            messages=[
+                {"role": "system", "content": "You are a Python code optimization expert."},
+                {"role": "user", "content": f"Optimize this Python script:\n\n{script}"}
+            ]
+        )
+        
+        optimized_code = response.choices[0].message.content
+        return optimized_code
+        
+    except Exception as e:
+        logger.error(f"Optimization error: {str(e)}\n{traceback.format_exc()}")
+        raise
+
+def generate_script_map(functions: Dict[str, str]) -> nx.DiGraph:
+    """Generate dependency graph from function definitions"""
+    try:
+        G = nx.DiGraph()
+        for func_name, func_content in functions.items():
+            G.add_node(func_name)
+            # Parse function content to find dependencies
+            tree = ast.parse(func_content)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    called_func = node.func.id
+                    if called_func in functions:
+                        G.add_edge(func_name, called_func)
+        return G
+    except Exception as e:
+        logger.error(f"Error generating script map: {str(e)}")
+        return nx.DiGraph()
+
+def display_dependency_graph(G: nx.DiGraph):
+    """Display dependency graph with error handling"""
+    try:
+        if not G or G.number_of_nodes() == 0:
+            st.warning("No dependencies to display")
+            return
+            
+        # Create Plotly figure
+        pos = nx.spring_layout(G)
+        edge_trace = go.Scatter(
+            x=[], y=[], line=dict(width=0.5, color='#888'),
+            hoverinfo='none', mode='lines')
+            
+        node_trace = go.Scatter(
+            x=[], y=[], text=[], mode='markers+text',
+            hoverinfo='text', marker=dict(size=20))
+            
+        # Add edges
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_trace['x'] += (x0, x1, None)
+            edge_trace['y'] += (y0, y1, None)
+            
+        # Add nodes
+        for node in G.nodes():
+            x, y = pos[node]
+            node_trace['x'] += (x,)
+            node_trace['y'] += (y,)
+            node_trace['text'] += (node,)
+            
+        fig = go.Figure(data=[edge_trace, node_trace],
+                     layout=go.Layout(
+                         showlegend=False,
+                         hovermode='closest',
+                         margin=dict(b=0,l=0,r=0,t=0),
+                         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+                     ))
+                     
+        st.plotly_chart(fig)
+        
+    except Exception as e:
+        logger.error(f"Graph visualization error: {str(e)}")
+        st.error("Failed to display dependency graph")

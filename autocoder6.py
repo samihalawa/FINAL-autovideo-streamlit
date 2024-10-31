@@ -36,6 +36,10 @@ from streamlit_agraph import agraph, Node, Edge, Config
 from typing import Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import openai
+import sys
+from typing import Any, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 # Streamlit Page Configuration
 st.set_page_config(
@@ -55,34 +59,40 @@ logging.basicConfig(
 # ==========================
 # State Management
 # ==========================
+@dataclass
 class State:
-    def __init__(self):
-        self.settings = {
-            "model": "gpt-3.5-turbo",
-            "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
-            "theme": "Light",
-            "session_timeout": 30,
-            "coder_initialized": False
-        }
-        self.code_blocks = {}
-        self.block_versions = {}
-        self.processing_status = {}
-        self.custom_prompts = {}
-        self.ordered_blocks = []
-        self.retry_counts = {}
-        self.global_prompt = ""
-        self.undo_stack = {}
-        self.redo_stack = {}
-        self.tags = {}
-        self.agent_outputs = {}
-        self.logs = []
-        self.session_start = datetime.datetime.now()
-        self.coder = None
-        self.profiling_results = {}
-        self.unused_imports = {}
-        self.memory = ConversationBufferMemory()
-        self.profiling_results_depth = 10
-        self.show_logs = True
+    settings: dict = field(default_factory=lambda: {
+        "model": "gpt-3.5-turbo",
+        "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+        "theme": "Light",
+        "session_timeout": 30,
+        "coder_initialized": False,
+        "show_profiling": False
+    })
+    code_blocks: dict = field(default_factory=dict)
+    block_versions: dict = field(default_factory=dict)
+    processing_status: dict = field(default_factory=dict)
+    custom_prompts: dict = field(default_factory=dict)
+    ordered_blocks: list = field(default_factory=list)
+    retry_counts: dict = field(default_factory=dict)
+    global_prompt: str = ""
+    undo_stack: dict = field(default_factory=dict)
+    redo_stack: dict = field(default_factory=dict)
+    tags: dict = field(default_factory=dict)
+    agent_outputs: dict = field(default_factory=dict)
+    logs: list = field(default_factory=list)
+    session_start: datetime = field(default_factory=datetime.now)
+    coder: Optional[Coder] = None
+    profiling_results: dict = field(default_factory=dict)
+    unused_imports: dict = field(default_factory=dict)
+    memory: ConversationBufferMemory = field(default_factory=ConversationBufferMemory)
+    profiling_results_depth: int = 10
+    show_logs: bool = True
+
+    def is_session_expired(self) -> bool:
+        """Check if the current session has expired"""
+        timeout = timedelta(minutes=self.settings["session_timeout"])
+        return datetime.now() - self.session_start > timeout
 
 @st.cache_resource
 def get_state():
@@ -835,10 +845,104 @@ class OptimizationWorkflow:
             self.log_error(f"optimization_{name}", e)
             return content
 
+    def validate_section(self, code: str) -> bool:
+        """Validate that the optimized code is syntactically correct"""
+        try:
+            ast.parse(code)
+            return True
+        except SyntaxError:
+            return False
+
+    def log_success(self, name: str) -> None:
+        """Log successful optimization"""
+        log_event(f"Successfully optimized section: {name}", self.state)
+
+    def log_error(self, name: str, error: Exception) -> None:
+        """Log optimization error"""
+        error_msg = f"Error optimizing {name}: {str(error)}"
+        log_event(error_msg, self.state)
+        log_error(error_msg)
+
+    def generate_prompt(self, name: str, content: str) -> str:
+        """Generate optimization prompt for a code section"""
+        return f"""Please optimize the following Python code section '{name}':
+        
+{content}
+
+Focus on:
+1. Performance improvements
+2. Code readability
+3. Best practices
+4. Memory efficiency
+
+Return only the optimized code without explanations."""
+
+    def profile_sections(self, sections: Dict[str, str]) -> None:
+        """Profile optimized code sections"""
+        for name, content in sections.items():
+            try:
+                profiler = ProfilerAgent()
+                result = profiler.profile_block(name, content)
+                self.state.profiling_results[name] = result
+            except Exception as e:
+                self.log_error(name, e)
+
+    def assemble_script(self, sections: Dict[str, str]) -> str:
+        """Assemble optimized sections into final script"""
+        parts = []
+        if sections.get("imports"):
+            parts.extend(sections["imports"])
+        if sections.get("settings"):
+            parts.append(sections["settings"])
+        if sections.get("class_definitions"):
+            parts.extend(sections["class_definitions"].values())
+        if sections.get("function_definitions"):
+            parts.extend(sections["function_definitions"].values())
+        if sections.get("global_code"):
+            parts.extend(sections["global_code"])
+        
+        return "\n\n".join(parts)
+
+def execute_code(block_name: str, code: str) -> str:
+    """
+    Safely executes a code block and returns the output.
+    """
+    output = io.StringIO()
+    try:
+        # Redirect stdout to capture output
+        sys.stdout = output
+        # Create a restricted globals dictionary
+        restricted_globals = {
+            '__builtins__': {
+                name: __builtins__[name] 
+                for name in ['print', 'len', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple']
+            }
+        }
+        exec(code, restricted_globals)
+        return output.getvalue()
+    except Exception as e:
+        return f"Error executing code: {str(e)}"
+    finally:
+        sys.stdout = sys.__stdout__
+
+def check_session_expiry():
+    """Check and handle session expiration"""
+    if state.is_session_expired():
+        st.warning("Session expired. Please log in again.")
+        st.session_state['authentication_status'] = False
+        return False
+    return True
+
 def main():
     auth_status, username = authenticate_user()
     if not auth_status:
         st.stop()
+
+    if not check_session_expiry():
+        st.stop()
+
+    # Reset session timer on activity
+    state.session_start = datetime.now()
 
     menu_items = ["Settings", "Input Code", "Code Blocks", "Graph Visualization", "Help"]
     icons = ['gear', 'input-cursor-text', 'code-slash', 'share', 'question-circle']
@@ -851,7 +955,12 @@ def main():
         "Graph Visualization": render_graph_view,
         "Help": render_help_page
     }
-    render_functions[selected]()
+    
+    try:
+        render_functions[selected]()
+    except Exception as e:
+        log_error(f"Error rendering {selected}: {str(e)}")
+        st.error("An error occurred. Please try again or contact support.")
 
 if __name__ == "__main__":
     main()
