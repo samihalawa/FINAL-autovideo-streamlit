@@ -4,7 +4,6 @@ import os
 import re
 import ast
 import json
-import subprocess
 import streamlit as st
 from typing import List, Dict, Any, Optional, Union, Tuple, Callable
 import openai
@@ -17,8 +16,6 @@ from streamlit_ace import st_ace
 from streamlit_agraph import agraph, Node, Edge, Config
 import plotly.graph_objects as go
 import logging
-import cProfile
-import pstats
 import io
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
@@ -35,6 +32,8 @@ from openai import OpenAI
 from langchain.memory import ConversationBufferMemory
 from dataclasses import field
 from datetime import datetime, timedelta
+import tempfile
+from contextlib import asynccontextmanager
 
 # Load environment variables from .env file if it exists
 env_path = Path('.env')
@@ -533,6 +532,31 @@ def validate_environment() -> bool:
     except ImportError as e:
         logger.error(f"Missing required dependency: {str(e)}")
         return False
+
+@asynccontextmanager
+async def managed_resource():
+    """Context manager for async resources"""
+    try:
+        yield
+    finally:
+        # Cleanup resources
+        await asyncio.sleep(0)
+
+@contextmanager
+def temp_file_manager():
+    """Manage temporary files with cleanup"""
+    temp_files = []
+    try:
+        yield temp_files
+    finally:
+        for file in temp_files:
+            try:
+                Path(file).unlink(missing_ok=True)
+            except Exception as e:
+                logger.error(f"Failed to delete temp file {file}: {e}")
+
+def save_optimization_result(result: str):
+    st.session_state['optimization_result'] = result
 
 if __name__ == "__main__":
     main()

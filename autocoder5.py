@@ -624,29 +624,29 @@ def display_dependency_graph(G: nx.DiGraph):
         logger.error(f"Graph visualization error: {str(e)}")
         st.error("Failed to display dependency graph")
 
-# Replace local Git operations with GitHub API
-def sync_with_github(code: str, message: str):
-    """Sync code with GitHub using API"""
+# Replace git operations with GitHub API
+def sync_code(code: str):
     try:
-        g = Github(st.session_state.settings['github']['token'])
-        repo = g.get_repo(f"{st.session_state.settings['github']['username']}/{st.session_state.settings['github']['repo']}")
-        
-        try:
-            # Try to get existing file
-            contents = repo.get_contents("optimized_code.py")
-            repo.update_file(
-                contents.path,
-                message,
-                code,
-                contents.sha
-            )
-        except:
-            # Create new file if it doesn't exist
-            repo.create_file(
-                "optimized_code.py",
-                message,
-                code
-            )
-        st.success("Code synced with GitHub")
+        g = Github(st.secrets["github_token"])
+        repo = g.get_repo(st.secrets["github_repo"])
+        repo.create_file(
+            "optimized_code.py",
+            "Update from AutocoderAI",
+            code
+        )
     except Exception as e:
-        st.error(f"GitHub sync failed: {str(e)}")
+        st.error(f"GitHub sync failed: {e}")
+
+@contextmanager
+def safe_file_operation(filepath: str):
+    """Safe file operations with cleanup"""
+    temp_file = None
+    try:
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        yield temp_file
+    finally:
+        if temp_file:
+            try:
+                os.unlink(temp_file.name)
+            except OSError:
+                pass

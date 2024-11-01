@@ -97,11 +97,8 @@ class ThreadSafeStateManager:
     @contextmanager
     def state_lock(self):
         """Context manager for thread-safe state access"""
-        try:
-            self._lock.acquire()
+        with self._lock:
             yield
-        finally:
-            self._lock.release()
     
     def init_state(self) -> None:
         """Initialize session state with default values"""
@@ -368,3 +365,15 @@ def optimize_sections(coder: Coder) -> None:
         with state_manager.state_lock():
             st.session_state.final_script = ""
         st.error("Failed to combine optimized code sections. Please check the error log and try again.")
+
+# Replace file operations with session state
+def save_state():
+    with state_manager.state_lock():
+        st.session_state['app_state'] = asdict(AppState())
+
+# Add safe imports
+try:
+    from aider.coders import Coder
+except ImportError:
+    st.warning("aider-chat not installed")
+    Coder = None

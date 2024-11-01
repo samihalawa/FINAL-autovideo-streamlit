@@ -1,9 +1,8 @@
-import os, re, ast, json, threading, subprocess, streamlit as st, openai, networkx as nx, matplotlib.pyplot as plt
-from typing import List, Dict, Any, Tuple
+import os, re, ast, json, threading, streamlit as st, openai, networkx as nx, matplotlib.pyplot as plt
+from typing import List, Dict, Any, Tuple, Optional
 from difflib import unified_diff
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_ace import st_ace
-import cProfile, pstats, io
 import logging
 import time
 from openai import OpenAI
@@ -11,11 +10,14 @@ import plotly.graph_objects as go
 
 # Logging function
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def log(msg: str, level: str = "INFO"):
+def log(msg: str, level: str = "INFO") -> None:
+    """Thread-safe logging function"""
     getattr(logging, level.lower())(msg)
-    if 'logs' in st.session_state:
-        st.session_state.logs.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {level}: {msg}")
+    with threading.Lock():
+        if 'logs' in st.session_state:
+            st.session_state.logs.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {level}: {msg}")
 
 st.set_page_config(page_title="AutocoderAI", layout="wide")
 openai.api_key = os.environ.get("OPENAI_API_KEY")
@@ -314,16 +316,15 @@ def interactive_function_editor():
             st.success(f"Function '{function_name}' updated successfully!")
             st.session_state['final_script'] = assemble_script()  # Reassemble the script with the updated function
 
-# Add performance profiling function
-def profile_performance(script: str):
-    pr = cProfile.Profile()
-    pr.enable()
-    exec(script)
-    pr.disable()
-    s = io.StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
-    ps.print_stats()
-    return s.getvalue()
+# Replace profiling with simple timing
+def profile_performance(script: str) -> str:
+    start_time = time.time()
+    try:
+        exec(script)
+        end_time = time.time()
+        return f"Execution time: {end_time - start_time:.2f} seconds"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 # Add unit test generation function
 def generate_unit_tests(script: str) -> str:

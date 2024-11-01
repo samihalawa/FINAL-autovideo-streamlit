@@ -26,11 +26,11 @@ from types import ModuleType
 from typing import Callable
 import shutil
 import psutil
-from contextlib import timeout
 import signal
 from typing import Generator
 import json
 import random
+import tempfile
 
 # Add proper logger initialization
 logger = logging.getLogger(__name__)
@@ -101,27 +101,32 @@ def load_module(module_name: str) -> Optional[Any]:
 def initialize_session_state() -> None:
     """Enhanced session state initialization with recovery"""
     try:
-        if not SessionManager.restore_session():
-            # Initialize defaults
-            defaults = {
-                'current_app': None,
-                'app_code_storage': {},
-                'version_history': [],
-                'error_count': 0,
-                'last_error': None,
-                'resource_usage': {},
-                'active_apps': set(),
-                'pending_operations': []
-            }
-            
-            for k, v in defaults.items():
-                if k not in st.session_state:
-                    st.session_state[k] = v
+        # Initialize defaults if not already set
+        defaults = {
+            'settings': {
+                'auto_save': True,
+                'show_previews': True,
+                'dark_mode': False,
+                'github': {
+                    'username': os.getenv('GITHUB_USERNAME', ''),
+                    'repo': os.getenv('GITHUB_REPO', ''),
+                    'token': os.getenv('GITHUB_TOKEN', '')
+                }
+            },
+            'current_app': None,
+            'app_code_storage': {},
+            'version_history': [],
+            'error_count': 0,
+            'last_error': None,
+            'resource_usage': {},
+            'active_apps': set(),
+            'pending_operations': []
+        }
+        
+        for k, v in defaults.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
                     
-        # Periodic backup
-        if random.random() < 0.1:  # 10% chance each run
-            SessionManager.backup_session()
-            
     except Exception as e:
         logger.error(f"Session initialization error: {e}")
         st.error("Failed to initialize session state")
@@ -185,41 +190,58 @@ class FileManager:
     @handle_errors
     def save_app_code(file_name: str, content: str) -> bool:
         """Universal save function with validation and error handling"""
-        if not isinstance(content, str):
-            raise ValueError("Content must be a string")
-        
-        if not file_name.endswith('.py'):
-            file_name = f"{file_name}.py"
+        try:
+            if not isinstance(content, str):
+                raise ValueError("Content must be a string")
             
-        # Add atomic file writing with backup
-        backup_file = f"{file_name}.bak"
-        lock_file = f"{file_name}.lock"
-        
-        with FileLock(lock_file):
-            try:
-                # Create backup of existing file
-                if os.path.exists(file_name):
-                    shutil.copy2(file_name, backup_file)
+            if not file_name.endswith('.py'):
+                file_name = f"{file_name}.py"
                 
-                # Write new content
-                with open(file_name, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                # Store in session state
-                StateManager.set(f"app_code_storage.{file_name}", content)
-                
-                # Remove backup if successful
-                if os.path.exists(backup_file):
-                    os.remove(backup_file)
+            # Add atomic file writing with backup
+            backup_file = f"{file_name}.bak"
+            lock_file = f"{file_name}.lock"
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(file_name) if os.path.dirname(file_name) else '.', exist_ok=True)
+            
+            with FileLock(lock_file):
+                try:
+                    # Create backup of existing file
+                    if os.path.exists(file_name):
+                        shutil.copy2(file_name, backup_file)
                     
-                return True
-                
-            except Exception as e:
-                logger.error(f"File write error: {e}")
-                # Restore from backup
-                if os.path.exists(backup_file):
-                    shutil.copy2(backup_file, file_name)
-                return False
+                    # Write new content
+                    with open(file_name, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    
+                    # Store in session state
+                    if 'app_code_storage' not in st.session_state:
+                        st.session_state.app_code_storage = {}
+                    st.session_state.app_code_storage[file_name] = content
+                    
+                    # Remove backup if successful
+                    if os.path.exists(backup_file):
+                        os.remove(backup_file)
+                        
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"File write error: {e}")
+                    # Restore from backup
+                    if os.path.exists(backup_file):
+                        shutil.copy2(backup_file, file_name)
+                    return False
+                finally:
+                    # Cleanup lock file
+                    if os.path.exists(lock_file):
+                        try:
+                            os.remove(lock_file)
+                        except OSError:
+                            pass
+                            
+        except Exception as e:
+            logger.error(f"File operation error: {e}")
+            return False
     
     @staticmethod
     @handle_errors
@@ -290,6 +312,28 @@ def monitor_resource_usage() -> Dict[str, float]:
         'cpu': process.cpu_percent()
     }
 
+@contextmanager
+def timeout(seconds: int):
+    """Custom timeout context manager compatible with all Python versions."""
+    def signal_handler(signum, frame):
+        raise TimeoutError(f"Operation timed out after {seconds} seconds")
+
+    # Only use SIGALRM on Unix systems
+    if hasattr(signal, 'SIGALRM'):
+        # Register a function to raise a TimeoutError on the signal
+        signal.signal(signal.SIGALRM, signal_handler)
+        # Schedule the signal to be sent after ``time``
+        signal.alarm(seconds)
+
+        try:
+            yield
+        finally:
+            # Disable the alarm
+            signal.alarm(0)
+    else:
+        # On Windows, just execute without timeout
+        yield
+
 def run_app_safely(module: Any, app_name: str) -> None:
     try:
         if not hasattr(module, 'main'):
@@ -302,7 +346,7 @@ def run_app_safely(module: Any, app_name: str) -> None:
         
         with st.spinner("Running app..."):
             try:
-                with timeout(30):  # Prevent infinite loops
+                with timeout(30):  # Use our custom timeout
                     module.main()
             except TimeoutError:
                 raise TimeoutError("App execution timed out")
@@ -409,6 +453,9 @@ def manage_dependencies() -> None:
 def github_integration() -> None:
     st.subheader("GitHub Integration")
     
+    if 'settings' not in st.session_state:
+        initialize_session_state()
+        
     github_settings = st.session_state.settings.get('github', {})
     if not all([github_settings.get('token'), github_settings.get('username'), github_settings.get('repo')]):
         st.warning("Please configure GitHub settings first in the Settings page")
@@ -735,27 +782,55 @@ def validate_app_data(data: Dict[str, Any]) -> Dict[str, Any]:
         raise TypeError("Invalid app data types")
     return data
 
-@api_call_wrapper
-def github_api_call(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    return func(*args, **kwargs)
-
-@validate_callback 
-def safe_callback(func: Callable[..., Any]) -> Any:
-    try:
-        return func()
-    except Exception as e:
-        logger.error(f"Callback error: {e}")
+def api_call_wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to handle API call errors and retries"""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"API call failed after {max_retries} attempts: {e}")
+                    raise
+                time.sleep(retry_delay * (attempt + 1))
         return None
+    return wrapper
+
+def validate_callback(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to validate callback functions"""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            if not callable(func):
+                raise ValueError("Invalid callback function")
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Callback validation failed: {e}")
+            return None
+    return wrapper
 
 def cleanup_app_state() -> None:
+    """Safe cleanup of app state and temporary files"""
     try:
         # Add atomic state cleanup
-        with FileLock("state.lock"):
-            # Clear temp session state
-            keys_to_remove = [k for k in st.session_state.keys()]
-            for k in keys_to_remove:
-                if k.startswith('temp_') or k in ['gh_token', 'current_code']:
-                    StateManager.delete(k)
+        lock_file = "state.lock"
+        try:
+            with FileLock(lock_file):
+                # Clear temp session state
+                keys_to_remove = [k for k in st.session_state.keys() 
+                                if k.startswith('temp_') or k in ['gh_token', 'current_code']]
+                for k in keys_to_remove:
+                    st.session_state.pop(k, None)
+        finally:
+            if os.path.exists(lock_file):
+                try:
+                    os.remove(lock_file)
+                except OSError:
+                    pass
         
         # Remove temp files safely
         temp_files = glob.glob("*.tmp")
@@ -764,13 +839,16 @@ def cleanup_app_state() -> None:
                 if os.path.exists(f):
                     os.remove(f)
             except OSError as e:
-                logger.error(f"Failed to remove temp file {f}: {e}")
+                logger.warning(f"Failed to remove temp file {f}: {e}")
                 
     except Exception as e:
         logger.error(f"Critical state cleanup error: {e}")
-        # Force reset session state on critical failure
-        st.session_state.clear()
-        initialize_session_state()
+        # Only clear session state on critical failure
+        try:
+            st.session_state.clear()
+            initialize_session_state()
+        except Exception as cleanup_error:
+            logger.critical(f"Failed to reset session state: {cleanup_error}")
 
 def safe_import(module: str) -> Optional[ModuleType]:
     try:
@@ -917,8 +995,9 @@ def main() -> None:
         raise
 
 def show_apps_page() -> None:
+    """Display and manage apps with proper error handling"""
     try:
-        # Add loading state protection
+        # Prevent concurrent operations
         if '_loading' in st.session_state:
             st.warning("Another operation is in progress...")
             return
@@ -926,49 +1005,56 @@ def show_apps_page() -> None:
         st.session_state['_loading'] = True
         try:
             st.title("Manage Apps")
-            apps = set(st.session_state.get('app_code_storage', {}))
             
+            # Get apps from session state and filesystem
+            apps = set(st.session_state.get('app_code_storage', {}))
             if not is_streamlit_cloud():
                 apps.update(f for f in os.listdir() 
-                           if f.endswith('.py') and f != 'streamlit_app.py')
+                          if f.endswith('.py') and f != 'streamlit_app.py')
             
             apps = sorted(apps)
             if not apps:
-                st.info("No apps found")
+                st.info("No apps found. Create a new app to get started!")
                 return
                 
-            query = st.text_input("Search", st.session_state.get('search_query', ''))
+            # Search functionality
+            query = st.text_input("Search Apps", st.session_state.get('search_query', ''))
             if query:
                 apps = [a for a in apps if query.lower() in a.lower()]
                 
+            # Display apps
             for app in apps:
                 with st.expander(app):
-                    c1, c2, c3 = st.columns([3,1,1])
-                    with c1:
-                        show_app_preview(app)
-                    with c2:
-                        if st.button("Edit", key=f"edit_{app}"):
-                            st.session_state.update({
-                                'current_app': app,
-                                'editing': True
-                            })
-                            st.experimental_rerun()
-                    with c3:
-                        if st.button("Delete", key=f"delete_{app}"):
-                            if st.session_state.get('current_app') == app:
-                                del st.session_state['current_app']
-                            st.session_state.get('app_code_storage', {}).pop(app, None)
-                            if not is_streamlit_cloud() and os.path.exists(app):
-                                os.remove(app)
-                            st.success(f"Deleted {app}")
-                            time.sleep(1)
-                            st.experimental_rerun()
+                    try:
+                        c1, c2, c3 = st.columns([3,1,1])
+                        with c1:
+                            show_app_preview(app)
+                        with c2:
+                            if st.button("Edit", key=f"edit_{app}"):
+                                st.session_state.update({
+                                    'current_app': app,
+                                    'editing': True
+                                })
+                                st.experimental_rerun()
+                        with c3:
+                            if st.button("Delete", key=f"delete_{app}"):
+                                if st.session_state.get('current_app') == app:
+                                    del st.session_state['current_app']
+                                st.session_state.get('app_code_storage', {}).pop(app, None)
+                                if not is_streamlit_cloud() and os.path.exists(app):
+                                    os.remove(app)
+                                st.success(f"Deleted {app}")
+                                time.sleep(1)
+                                st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Error displaying app {app}: {str(e)}")
+                        
         finally:
             st.session_state.pop('_loading', None)
             
     except Exception as e:
         logger.error(f"Apps page error: {e}")
-        st.error("Failed to load apps")
+        st.error("Failed to load apps page")
         cleanup_app_state()
 
 def cleanup_failed_app() -> None:
@@ -1010,15 +1096,28 @@ def clear_all_data() -> bool:
         return False
 
 def initialize_app() -> bool:
+    """Initialize app with proper error handling and state management"""
     try:
+        # Setup logging
         setup_logging()
+        
+        # Initialize session state
         initialize_session_state()
+        
+        # Create necessary directories if not on cloud
         if not is_streamlit_cloud():
             os.makedirs('apps', exist_ok=True)
             os.makedirs('templates', exist_ok=True)
+            os.makedirs('logs', exist_ok=True)
+        
+        # Monitor initial resource usage
+        st.session_state['resource_usage'] = monitor_resource_usage()
+        
         return True
+        
     except Exception as e:
-        logger.error(f"Init error: {e}")
+        logger.error(f"App initialization error: {e}")
+        st.error("Failed to initialize application")
         return False
 
 def load_app_code(name: str) -> Optional[str]:
@@ -1292,6 +1391,32 @@ class FileSystemManager:
                 shutil.copy2(backup_path, file_name)
             return False
 
+# Add proper dependency checks
+def check_dependencies() -> bool:
+    """Check if all required packages are installed."""
+    required_packages: Dict[str, str] = {
+        'streamlit': 'streamlit',
+        'openai': 'openai',
+        'github': 'PyGithub',
+        'dotenv': 'python-dotenv',
+        'streamlit_ace': 'streamlit-ace'
+    }
+    
+    missing = []
+    for module, package in required_packages.items():
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    
+    if missing:
+        st.error(f"Missing required packages: {', '.join(missing)}")
+        st.info("Install missing packages with: pip install -r requirements.txt")
+        return False
+    return True
+
+if not check_dependencies():
+    st.stop()
 if __name__ == "__main__":
     try:
         if ensure_dependencies():
@@ -1301,3 +1426,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=True)
         st.error(f"Critical error: {e}")
+

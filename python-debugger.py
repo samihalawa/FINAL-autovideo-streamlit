@@ -9,17 +9,28 @@ from contextlib import contextmanager
 import ast
 import time
 from pathlib import Path
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("debugger.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+class SafeExecutionError(Exception):
+    """Custom exception for safe execution errors"""
+    pass
+
+def create_safe_globals() -> Dict[str, Any]:
+    """Create restricted globals dictionary"""
+    return {
+        '__builtins__': {
+            name: __builtins__[name]
+            for name in ['print', 'len', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple']
+        }
+    }
 
 # Configure Streamlit page
 st.set_page_config(
@@ -51,19 +62,14 @@ def safe_exec(code: str, globals_dict: Optional[Dict[str, Any]] = None, locals_d
         ast.parse(code)
         
         # Create restricted globals
-        safe_globals = {
-            '__builtins__': {
-                name: __builtins__[name]
-                for name in ['print', 'len', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple']
-            }
-        }
+        safe_globals = create_safe_globals()
         globals_dict.update(safe_globals)
         
         exec(code, globals_dict, locals_dict)
         return locals_dict
     except Exception as e:
         logger.error(f"Code execution error: {str(e)}")
-        raise
+        raise SafeExecutionError(f"Code execution error: {str(e)}")
 
 def format_variable(name: str, value: Any) -> str:
     """Format variable for display with type safety"""
@@ -88,13 +94,12 @@ def initialize_session_state():
 
 def save_execution_history(code: str):
     """Save code execution history with timestamp"""
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.code_history.append({
-        "code": code,
-        "timestamp": timestamp,
-        "execution_number": st.session_state.execution_count
+    if 'execution_history' not in st.session_state:
+        st.session_state.execution_history = []
+    st.session_state.execution_history.append({
+        'code': code,
+        'timestamp': datetime.now().isoformat()
     })
-    st.session_state.execution_count += 1
 
 def main():
     """Main application entry point with comprehensive error handling"""
@@ -132,8 +137,8 @@ def main():
                         if output.getvalue():
                             st.code(output.getvalue(), language="python")
                         save_execution_history(code)
-                    except Exception as e:
-                        st.error("An error occurred during execution:")
+                    except SafeExecutionError as e:
+                        st.error(f"Safe execution error: {str(e)}")
                         st.code(traceback.format_exc(), language="python")
                         logger.error(f"Execution error: {str(e)}")
 

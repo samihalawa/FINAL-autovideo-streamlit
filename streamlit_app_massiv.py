@@ -196,6 +196,9 @@ def simulate_cloud_workflows():
         
     return issues
 
+def save_app_state(data: dict):
+    st.session_state['app_data'] = data
+
 def main():
     """Cloud-optimized main application"""
     try:

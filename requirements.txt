@@ -1,28 +1,42 @@
-aider-chat
-black
-cryptography
-dataclasses-json
-filelock
-folium
-langchain
-matplotlib
-networkx
-numpy
-openai
-pandas
-Pillow
-plotly
-PyGithub
-python-dotenv
-pyvis
-requests
-scikit-learn
-streamlit
-streamlit-ace
-streamlit-agraph
-streamlit-authenticator
-streamlit-folium
-streamlit-modal
-streamlit-option-menu
-streamlit-sortables
-tiktoken
+# Core dependencies
+streamlit>=1.28.0,<2.0.0
+streamlit-ace>=0.1.1
+streamlit-agraph>=0.0.45
+streamlit-option-menu>=0.3.6
+streamlit-authenticator>=0.2.3
+
+# OpenAI and AI tools
+openai>=1.3.0,<2.0.0
+langchain>=0.0.330,<1.0.0
+tiktoken>=0.5.1
+
+# Data processing and visualization
+numpy>=1.24.0
+pandas>=2.0.0
+plotly>=5.18.0
+
+# Optional video features
+moviepy>=1.0.3; platform_system!="Linux"
+gTTS>=2.3.2; platform_system!="Linux"
+
+# File handling & system
+python-dotenv>=1.0.0
+PyGithub>=2.1.1
+psutil>=5.9.0
+
+# Security
+cryptography>=41.0.0
+
+# Development
+black>=23.11.0
+tqdm>=4.66.1
+
+# File operations
+filelock>=3.13.1
+
+# Core imports used in the code
+importlib-metadata>=6.8.0
+types-python-dateutil>=2.8.19.14
+
+# Optional ML template dependencies
+scikit-learn>=1.3.2
