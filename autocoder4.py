@@ -34,6 +34,8 @@ from dataclasses import field
 from datetime import datetime, timedelta
 import tempfile
 from contextlib import asynccontextmanager
+import cProfile
+import pstats
 
 # Load environment variables from .env file if it exists
 env_path = Path('.env')
@@ -55,13 +57,19 @@ TIMEOUT_SECONDS = 30
 SUPPORTED_MODELS = ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo-preview"]
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 LOG_FILE = "autocoder.log"
+RATE_LIMIT_REQUESTS = 60  # Requests per minute
+CACHE_TTL = 3600  # Cache time-to-live in seconds
 
-# Configure logging
+# Configure logging with rotation
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        logging.handlers.RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=10485760,  # 10MB
+            backupCount=5
+        ),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -79,94 +87,137 @@ class Settings:
     max_retries: int = MAX_RETRIES
     debug_mode: bool = False
     log_level: str = "INFO"
+    rate_limit: int = RATE_LIMIT_REQUESTS
+    cache_ttl: int = CACHE_TTL
+    theme: str = "light"
+    code_style: str = "monokai"
+
+@dataclass
+class CodeAnalysis:
+    complexity: int
+    maintainability: float
+    security_score: float
+    performance_metrics: Dict[str, float]
+    suggestions: List[str]
+    warnings: List[str]
 
 @dataclass
 class AppState:
-    script_sections: Dict[str, Any]
-    optimized_script: str
-    optimization_steps: List[str]
-    current_step: int
-    graph: nx.DiGraph
-    optimization_history: List[str]
-    settings: Settings
-    profiling_results: Dict[str, str]
-    error_log: List[str]
-    logs: List[str]
+    script_sections: Dict[str, Any] = field(default_factory=dict)
+    optimized_script: str = ""
+    optimization_steps: List[str] = field(default_factory=list)
+    current_step: int = 0
+    graph: nx.DiGraph = field(default_factory=nx.DiGraph)
+    optimization_history: List[str] = field(default_factory=list)
+    settings: Settings = field(default_factory=lambda: Settings(
+        openai_api_key=DEFAULT_OPENAI_API_KEY,
+        model=DEFAULT_OPENAI_MODEL
+    ))
+    profiling_results: Dict[str, str] = field(default_factory=dict)
+    error_log: List[str] = field(default_factory=list)
+    logs: List[str] = field(default_factory=list)
+    analysis_results: Dict[str, CodeAnalysis] = field(default_factory=dict)
+    last_api_call: datetime = field(default_factory=datetime.now)
+    api_call_count: int = 0
 
+    def __init__(self):
+        self.reset_state()
+        
+    def reset_state(self):
+        """Reset state to defaults"""
+        self.script_sections = {}
+        self.optimized_script = ""
+        self.optimization_steps = []
+        self.current_step = 0
+        self.graph = nx.DiGraph()
+        self.optimization_history = []
+        self.profiling_results = {}
+        self.error_log = []
+        self.logs = []
+        self.analysis_results = {}
+        self.last_api_call = datetime.now()
+        self.api_call_count = 0
+        
     def clear(self):
         """Safely clear all state data"""
-        self.script_sections.clear()
-        self.optimized_script = ""
-        self.optimization_steps.clear()
-        self.current_step = 0
-        self.graph.clear()
-        self.optimization_history.clear()
-        self.profiling_results.clear()
-        self.error_log.clear()
-        self.logs.clear()
+        try:
+            self.reset_state()
+        except Exception as e:
+            logger.error(f"Error clearing state: {e}")
+            raise
 
 def initialize_state() -> None:
-    """Initialize application state with defaults"""
+    """Initialize application state with defaults and error handling"""
     if 'state' not in st.session_state:
         try:
-            st.session_state.state = AppState(
-                script_sections={},
-                optimized_script="",
-                optimization_steps=[],
-                current_step=0,
-                graph=nx.DiGraph(),
-                optimization_history=[],
-                settings=Settings(
-                    openai_api_key=DEFAULT_OPENAI_API_KEY,
-                    model=DEFAULT_OPENAI_MODEL
-                ),
-                profiling_results={},
-                error_log=[],
-                logs=[]
-            )
+            st.session_state.state = AppState()
+            logger.info("Application state initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize state: {str(e)}")
-            raise
+            raise RuntimeError(f"Application initialization failed: {str(e)}")
 
 initialize_state()
 state = st.session_state.state
 
 def log(msg: str, level: str = "INFO") -> None:
-    """Centralized logging function with error handling"""
+    """Centralized logging function with error handling and rate limiting"""
     try:
         log_level = getattr(logging, level.upper())
         logger.log(log_level, msg)
-        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         state.logs.append(f"[{timestamp}] {level}: {msg}")
+        
+        # Maintain log size
+        if len(state.logs) > 1000:
+            state.logs = state.logs[-1000:]
     except Exception as e:
         logger.error(f"Logging error: {str(e)}")
+        if state.settings.debug_mode:
+            st.error(f"Logging error: {str(e)}")
 
 def validate_api_key(key: str) -> bool:
-    """Validate OpenAI API key format"""
+    """Validate OpenAI API key format and rate limits"""
     if not key:
         return False
-    return bool(re.match(r'^sk-[a-zA-Z0-9]{48}$', key))
-
-def validate_input(script: str) -> bool:
-    """Validate Python script input"""
-    if not script or not isinstance(script, str):
+    if not re.match(r'^sk-[a-zA-Z0-9]{48}$', key):
         return False
+        
+    # Check rate limiting
+    now = datetime.now()
+    if (now - state.last_api_call).seconds < 60:
+        if state.api_call_count >= state.settings.rate_limit:
+            raise ValueError("API rate limit exceeded")
+    else:
+        state.api_call_count = 0
+        state.last_api_call = now
+        
+    return True
+
+def validate_input(script: str) -> Tuple[bool, Optional[str]]:
+    """Validate Python script input with detailed feedback"""
+    if not script or not isinstance(script, str):
+        return False, "Empty or invalid input"
     try:
         ast.parse(script)
-        return True
-    except (SyntaxError, ValueError, TypeError):
-        return False
+        return True, None
+    except SyntaxError as e:
+        return False, f"Syntax error at line {e.lineno}: {e.msg}"
+    except (ValueError, TypeError) as e:
+        return False, str(e)
 
 @st.cache_data(ttl=3600)
 def set_openai_creds(key: str, model: str) -> None:
-    """Set OpenAI credentials with validation and caching"""
+    """Set OpenAI credentials with validation, caching and error handling"""
     try:
         if not validate_api_key(key):
             raise ValueError("Invalid API key format")
         if model not in SUPPORTED_MODELS:
             raise ValueError(f"Unsupported model. Must be one of: {', '.join(SUPPORTED_MODELS)}")
         
-        openai.api_key = key
+        # Initialize OpenAI client
+        client = OpenAI(api_key=key)
+        
+        # Update settings
         state.settings = Settings(
             openai_api_key=key,
             model=model,
@@ -174,7 +225,11 @@ def set_openai_creds(key: str, model: str) -> None:
             show_profiling=state.settings.show_profiling,
             timeout_seconds=state.settings.timeout_seconds,
             max_retries=state.settings.max_retries,
-            debug_mode=state.settings.debug_mode
+            debug_mode=state.settings.debug_mode,
+            rate_limit=state.settings.rate_limit,
+            cache_ttl=state.settings.cache_ttl,
+            theme=state.settings.theme,
+            code_style=state.settings.code_style
         )
         
         # Verify API key works
@@ -233,64 +288,82 @@ def profile_performance(script: str) -> str:
 
 async def optimize_script(script_input: str, optimization_strategy: str = "performance") -> str:
     """Optimize script with progress tracking and comprehensive error handling"""
-    if not validate_input(script_input):
-        raise ValueError("Invalid Python script")
+    if not isinstance(script_input, str):
+        raise TypeError("Script input must be a string")
         
-    sections = extract_sections(script_input)
-    state.script_sections = sections
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
+    valid, error_msg = validate_input(script_input)
+    if not valid:
+        raise ValueError(f"Invalid script: {error_msg}")
+    
     try:
-        async with ThreadPoolExecutor() as executor:
-            future_to_section = {
-                executor.submit(
-                    optimize_section_async, 
-                    name, 
-                    content
-                ): name
-                for name, content in sections.items()
-                if name != "package_installations"
-            }
-            
-            total = len(future_to_section)
-            optimized_sections = {}
-            
-            for i, future in enumerate(as_completed(future_to_section)):
-                section_name = future_to_section[future]
-                try:
-                    name, optimized_content = await future.result()
-                    optimized_sections[name] = optimized_content
-                    
-                    # Update progress
-                    progress = (i + 1) / total
-                    progress_bar.progress(progress)
-                    status_text.text(f"Optimizing {section_name} ({i+1}/{total})")
-                    
-                    # Profile if enabled
-                    if state.settings.show_profiling:
-                        profile_result = profile_performance(optimized_content)
-                        state.profiling_results[section_name] = profile_result
-                        
-                except Exception as e:
-                    error_msg = f"Error optimizing {section_name}: {str(e)}"
-                    log(error_msg, "ERROR")
-                    optimized_sections[section_name] = sections[section_name]  # Keep original on error
-                    
-        # Combine sections in correct order
-        return "\n\n".join(
-            optimized_sections.get(name, content)
-            for name, content in sections.items()
-        )
+        # Add memory monitoring
+        process = psutil.Process()
+        initial_memory = process.memory_info().rss
         
-    except Exception as e:
-        error_msg = f"Error in optimization process: {str(e)}"
-        log(error_msg, "ERROR")
-        raise
-    finally:
-        progress_bar.empty()
-        status_text.empty()
+        sections = extract_sections(script_input)
+        state.script_sections = sections
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            async with ThreadPoolExecutor() as executor:
+                future_to_section = {
+                    executor.submit(
+                        optimize_section_async, 
+                        name, 
+                        content
+                    ): name
+                    for name, content in sections.items()
+                    if name != "package_installations"
+                }
+                
+                total = len(future_to_section)
+                optimized_sections = {}
+                
+                for i, future in enumerate(as_completed(future_to_section)):
+                    section_name = future_to_section[future]
+                    try:
+                        name, optimized_content = await future.result()
+                        optimized_sections[name] = optimized_content
+                        
+                        # Update progress
+                        progress = (i + 1) / total
+                        progress_bar.progress(progress)
+                        status_text.text(f"Optimizing {section_name} ({i+1}/{total})")
+                        
+                        # Profile if enabled
+                        if state.settings.show_profiling:
+                            profile_result = profile_performance(optimized_content)
+                            state.profiling_results[section_name] = profile_result
+                            
+                    except Exception as e:
+                        error_msg = f"Error optimizing {section_name}: {str(e)}"
+                        log(error_msg, "ERROR")
+                        optimized_sections[section_name] = sections[section_name]  # Keep original on error
+                        
+            # Combine sections in correct order
+            optimized_code = "\n\n".join(
+                optimized_sections.get(name, content)
+                for name, content in sections.items()
+            )
+            
+            # Check memory usage
+            final_memory = process.memory_info().rss
+            if final_memory - initial_memory > 100 * 1024 * 1024:  # 100MB threshold
+                logger.warning("High memory usage detected during optimization")
+                
+            return optimized_code
+            
+        except Exception as e:
+            logger.error(f"Optimization failed: {str(e)}")
+            raise
+        finally:
+            # Ensure cleanup
+            if 'progress_bar' in locals():
+                progress_bar.empty()
+            if 'status_text' in locals():
+                status_text.empty()
 
 def display_profiling_results() -> None:
     """Display profiling results in expandable sections with error handling"""
