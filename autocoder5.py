@@ -125,6 +125,64 @@ def set_openai_creds(key: str, model: str, endpoint: str):
         st.error(f"Error setting OpenAI credentials: {str(e)}")
         log(f"Error: {str(e)}")
 
+# Add after the existing imports
+SPECIALIZED_PROMPTS = {
+    "code_review": """
+    [ROLE]
+    You are a thorough code reviewer focused on best practices and maintainability.
+    
+    [REVIEW FOCUS]
+    - Code style and consistency
+    - Potential bugs and edge cases
+    - Documentation completeness
+    - Test coverage
+    """,
+    
+    "performance": """
+    [ROLE]
+    You are a performance optimization specialist focused on speed and efficiency.
+    
+    [OPTIMIZATION FOCUS]
+    - Algorithm complexity
+    - Memory usage
+    - Database query optimization
+    - Caching strategies
+    """,
+    
+    "security": """
+    [ROLE]
+    You are a security expert focused on identifying and fixing vulnerabilities.
+    
+    [SECURITY FOCUS]
+    - Input validation
+    - Authentication/Authorization
+    - Data encryption
+    - Common attack vectors
+    """,
+    
+    "refactoring": """
+    [ROLE]
+    You are a refactoring specialist focused on improving code structure.
+    
+    [REFACTOR FOCUS]
+    - SOLID principles
+    - Design patterns
+    - Code duplication
+    - Module organization
+    """,
+    
+    "testing": """
+    [ROLE]
+    You are a testing expert focused on comprehensive test coverage.
+    
+    [TESTING FOCUS]
+    - Unit tests
+    - Integration tests
+    - Edge cases
+    - Test organization
+    """,
+}
+
 # Code optimization class
 class CodeOptimizer:
     def __init__(self, api_key: str, model: str):
@@ -135,10 +193,16 @@ class CodeOptimizer:
         if not code.strip():
             raise ValueError("Empty code provided")
         
+        # Get specialized prompt if available
+        system_prompt = SPECIALIZED_PROMPTS.get(
+            optimization_type,
+            "You are a Python code optimization expert."
+        )
+        
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": "You are a Python code optimization expert."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Optimize this Python code ({optimization_type} optimization):\n\n{code}"}
             ],
             temperature=0.7,
