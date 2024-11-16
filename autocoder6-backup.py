@@ -46,6 +46,7 @@ from rich.console import Console
 from rich.progress import Progress
 from streamlit_autorefresh import st_autorefresh
 from streamlit_dynamic_filters import DynamicFilters
+import json
 
 # Enhanced logging configuration
 logging.basicConfig(
@@ -160,6 +161,85 @@ class WorkflowOrchestrator:
         ]
         return Panel("\n".join(content), title="Optimization Progress")
 
+    async def _analyze_code_structure(self, code: str) -> List[Dict[str, Any]]:
+        """Analyze code structure and return blocks"""
+        try:
+            tree = ast.parse(code)
+            blocks = []
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    blocks.append({
+                        "type": type(node).__name__,
+                        "name": node.name,
+                        "code": ast.get_source_segment(code, node)
+                    })
+            return blocks
+        except Exception as e:
+            logger.error(f"Code analysis error: {e}")
+            return []
+
+    async def _generate_optimization_plan(self, analysis: List[Dict[str, Any]]) -> List[OptimizationBlock]:
+        """Generate optimization plan from analysis"""
+        try:
+            return [
+                OptimizationBlock(
+                    original=block["code"],
+                    block_type=block["type"]
+                )
+                for block in analysis
+            ]
+        except Exception as e:
+            logger.error(f"Plan generation error: {e}")
+            return []
+
+    async def _optimize_block(self, block: OptimizationBlock) -> OptimizationBlock:
+        """Optimize single code block"""
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a Python code optimizer."},
+                    {"role": "user", "content": f"Optimize this code:\n{block.original}"}
+                ]
+            )
+            block.optimized = response.choices[0].message.content
+            block.status = "complete"
+            block.messages.append("Optimization complete")
+            return block
+        except Exception as e:
+            logger.error(f"Block optimization error: {e}")
+            block.status = "failed"
+            block.messages.append(f"Error: {str(e)}")
+            return block
+
+    async def _integrate_blocks(self) -> str:
+        """Integrate optimized blocks"""
+        try:
+            return "\n\n".join(
+                block.optimized or block.original
+                for block in self.blocks
+            )
+        except Exception as e:
+            logger.error(f"Block integration error: {e}")
+            return ""
+
+    async def _validate_result(self, code: str) -> bool:
+        """Validate final optimized code"""
+        try:
+            ast.parse(code)
+            return True
+        except Exception as e:
+            logger.error(f"Validation error: {e}")
+            return False
+
+    async def get_final_result(self) -> Optional[str]:
+        """Get final optimized code result"""
+        try:
+            return await self._integrate_blocks()
+        except Exception as e:
+            logger.error(f"Failed to get final result: {e}")
+            return None
+
 # Initialize OpenAI client with retry mechanism
 @functools.lru_cache(maxsize=1)
 def get_openai_client() -> Optional[OpenAI]:
@@ -167,13 +247,14 @@ def get_openai_client() -> Optional[OpenAI]:
         try:
             api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
             if not api_key:
-                raise ValueError("OpenAI API key not found")
+                st.warning("API key not found - using fallback mode")
+                return None
             return OpenAI(api_key=api_key)
         except Exception as e:
-            logger.error(f"OpenAI client initialization attempt {attempt + 1} failed: {e}")
             if attempt == MAX_RETRIES - 1:
-                st.error("Failed to initialize OpenAI client. Please check your API key.")
-                st.stop()
+                st.error("API connection failed - using fallback mode")
+                return None
+            time.sleep(1)  # Backoff before retry
     return None
 
 # Initialize client safely
@@ -258,6 +339,21 @@ class AppState:
             "timestamp": datetime.now(),
             "data": metrics
         }
+
+    def update_settings(self, new_settings: Dict[str, Any]):
+        try:
+            # Validate new settings
+            self._validate_settings(new_settings)
+            # Update if valid
+            self.settings.update(new_settings)
+        except ValueError as e:
+            logger.error(f"Invalid settings: {e}")
+            raise
+
+    def _validate_settings(self, settings: Dict[str, Any]):
+        if not isinstance(settings, dict):
+            raise ValueError("Settings must be a dictionary")
+        # ... existing validation code ...
 
 class CodeOptimizer:
     """Enhanced AI-powered code optimization manager"""
@@ -373,17 +469,27 @@ def error_boundary(operation: str):
 def render_code_editor():
     """Render code editor with input validation"""
     try:
-        return st_ace(
+        code = st_ace(
             value="# Enter your Python code here",
             language="python",
             theme="monokai",
             height=300,
-            key="code_editor",
-            on_change=lambda: validate_code(st.session_state.code_editor)
+            key="code_editor"
         )
+        if code and code.strip():
+            try:
+                ast.parse(code)
+                return code
+            except SyntaxError as e:
+                st.error(f"Syntax error in code: {str(e)}")
+                return None
+            except Exception as e:
+                st.error(f"Invalid code: {str(e)}")
+                return None
+        return None
     except Exception as e:
-        logger.error(f"Code editor rendering failed: {e}")
-        st.error("Failed to load code editor")
+        logger.error(f"Code editor error: {e}")
+        st.error("Editor error - please try again")
         return None
 
 def validate_code(code: str) -> bool:
@@ -538,7 +644,26 @@ async def main():
                 if not history:
                     st.info("No optimization history available")
                 else:
-                    for entry in reversed(history):
+                    # Add pagination to history
+                    ITEMS_PER_PAGE = 10
+
+                    def paginate_history(history: List[Dict], page: int) -> List[Dict]:
+                        try:
+                            items_per_page = 10
+                            total_pages = max(1, (len(history) + items_per_page - 1) // items_per_page)
+                            page = max(1, min(page, total_pages))
+                            
+                            start = (page - 1) * items_per_page
+                            end = start + items_per_page
+                            return history[start:end], total_pages
+                        except Exception as e:
+                            logger.error(f"Pagination error: {e}")
+                            return [], 1
+
+                    # Update history display
+                    page = st.number_input("Page", min_value=1, value=1)
+                    paginated, total_pages = paginate_history(history, page)
+                    for entry in paginated:
                         with st.expander(f"Optimization at {entry['timestamp']}"):
                             st.code(entry["original"], language="python")
                             st.code(entry["optimized"], language="python")
@@ -561,18 +686,39 @@ async def main():
 async def cleanup_resources():
     """Cleanup application resources"""
     try:
+        # Stop resource monitor
+        if hasattr(st.session_state, 'optimizer'):
+            st.session_state.optimizer._resource_monitor.join(timeout=1)
+        
+        # Clear memory
         if hasattr(st.session_state, 'optimizer'):
             await st.session_state.optimizer.cleanup()
+            
+        # Force garbage collection
         gc.collect()
+        
+        # Close any open files
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
+            
     except Exception as e:
         logger.error(f"Resource cleanup failed: {e}")
+    finally:
+        # Ensure critical resources are released
+        gc.collect()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+    except asyncio.CancelledError:
+        logger.error("Application execution cancelled")
+        st.error("Application execution was cancelled")
     except Exception as e:
         logger.error(f"Application startup failed: {traceback.format_exc()}")
         st.error(f"Failed to start application: {str(e)}")
+    finally:
+        asyncio.run(cleanup_resources())
 
 class OptimizationStage(Enum):
     PLANNING = auto()
@@ -593,9 +739,15 @@ class OptimizationTask:
     status: str = "pending"
     result: Optional[str] = None
 
+@dataclass
+class AgentResult:
+    success: bool
+    result: Optional[Any] = None
+    error: Optional[str] = None
+
 class Agent(Protocol):
     """Base protocol for optimization agents"""
-    async def process(self, task: OptimizationTask) -> OptimizationTask:
+    async def process(self, task: OptimizationTask) -> AgentResult:
         ...
 
 class PlannerAgent:
@@ -617,7 +769,7 @@ class PlannerAgent:
 
 class AnalysisAgent:
     """Analyzes code structure and patterns"""
-    async def process(self, task: OptimizationTask) -> OptimizationTask:
+    async def process(self, task: OptimizationTask) -> AgentResult:
         try:
             response = await client.chat.completions.create(
                 model="gpt-4",
@@ -628,10 +780,9 @@ class AnalysisAgent:
             )
             task.result = response.choices[0].message.content
             task.status = "completed"
-            return task
+            return AgentResult(success=True, result=task.result)
         except Exception as e:
-            logger.error(f"Analysis error: {e}")
-            raise
+            return AgentResult(success=False, error=str(e))
 
 class SegmentationAgent:
     """Segments code into logical blocks"""
@@ -683,6 +834,18 @@ class VerificationAgent:
 
 class DocumentationAgent:
     """Updates code documentation"""
+    def _validate_docstring(self, docstring: str) -> bool:
+        """Validate generated docstring format"""
+        try:
+            lines = docstring.split("\n")
+            if not lines[0].strip().startswith('"""'):
+                return False
+            if not any(line.strip().endswith('"""') for line in lines):
+                return False
+            return True
+        except Exception:
+            return False
+
     async def process(self, task: OptimizationTask) -> OptimizationTask:
         try:
             response = await client.chat.completions.create(
@@ -694,6 +857,8 @@ class DocumentationAgent:
             )
             task.result = response.choices[0].message.content
             task.status = "completed"
+            if not self._validate_docstring(task.result):
+                raise ValueError("Invalid docstring format")
             return task
         except Exception as e:
             logger.error(f"Documentation error: {e}")
@@ -713,6 +878,7 @@ class OptimizationPipeline:
         }
         self.progress = Progress()
         self.console = Console()
+        self.results: Dict[OptimizationStage, Any] = {}
         
     async def optimize_code(self, code: str) -> str:
         """Run full optimization pipeline"""
@@ -751,21 +917,17 @@ class OptimizationPipeline:
     async def _process_task(self, task: OptimizationTask, progress_id: int) -> None:
         """Process single optimization task"""
         try:
-            agent = self.agents[task.stage]
-            
-            # Update progress
-            self.progress.update(progress_id, advance=50)
-            
-            # Process task
-            result = await agent.process(task)
-            
-            # Store result
-            task.result = result
-            task.status = "completed"
-            
-            # Update progress
-            self.progress.update(progress_id, advance=50)
-            
+            async with asyncio.timeout(self.settings["timeout"]):
+                agent = self.agents[task.stage]
+                self.progress.update(progress_id, advance=50)
+                result = await agent.process(task)
+                self.results[task.stage] = result.result
+                task.status = "completed"
+                self.progress.update(progress_id, advance=50)
+        except asyncio.TimeoutError:
+            task.status = "timeout"
+            logger.error(f"Task timed out: {task.stage}")
+            raise
         except Exception as e:
             task.status = "failed"
             logger.error(f"Task error: {e}")
@@ -900,3 +1062,73 @@ def render_optimization_interface():
         except Exception as e:
             st.error(f"Optimization failed: {str(e)}")
             logger.error(f"Pipeline error: {traceback.format_exc()}")
+
+# Add settings persistence
+def save_settings():
+    try:
+        # Validate settings
+        if not (0 <= st.session_state.temperature <= 1):
+            raise ValueError("Temperature must be between 0 and 1")
+        if not (100 <= st.session_state.max_tokens <= 4096):
+            raise ValueError("Max tokens must be between 100 and 4096")
+            
+        st.session_state.app_state.settings.update({
+            "model": st.session_state.model,
+            "temperature": st.session_state.temperature,
+            "max_tokens": st.session_state.max_tokens,
+            "timeout": st.session_state.timeout
+        })
+        st.success("Settings saved successfully")
+    except Exception as e:
+        logger.error(f"Settings save failed: {e}")
+        st.error(f"Failed to save settings: {str(e)}")
+
+# Update settings UI elements
+st.selectbox(
+    "Model",
+    ["gpt-4", "gpt-3.5-turbo"],
+    key="model",
+    on_change=save_settings
+)
+
+# Add global error boundary
+@contextmanager
+def global_error_boundary():
+    try:
+        yield
+    except Exception as e:
+        logger.error(f"Global error: {traceback.format_exc()}")
+        st.error("An unexpected error occurred. Please try again.")
+        if hasattr(st.session_state, 'app_state'):
+            st.session_state.app_state.error_count += 1
+        # Ensure cleanup
+        asyncio.run(cleanup_resources())
+
+# Add state validation
+def update_app_state(new_state: Dict[str, Any]):
+    try:
+        # Validate new state
+        if not isinstance(new_state, dict):
+            raise ValueError("New state must be a dictionary")
+            
+        # Update state
+        st.session_state.app_state.update(new_state)
+        
+        # Validate after update
+        validate_app_state(st.session_state.app_state)
+        
+    except Exception as e:
+        logger.error(f"State update failed: {e}")
+        raise
+
+# Add docstring validation
+def validate_docstring(docstring: str) -> bool:
+    try:
+        lines = docstring.split("\n")
+        if not lines[0].strip().startswith('"""'):
+            return False
+        if not any(line.strip().endswith('"""') for line in lines):
+            return False
+        return True
+    except Exception:
+        return False

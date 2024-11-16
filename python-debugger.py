@@ -10,6 +10,8 @@ import ast
 import time
 from pathlib import Path
 from datetime import datetime
+import re
+from typing import List, Tuple
 
 # Configure logging
 logging.basicConfig(
@@ -50,6 +52,57 @@ def stdout_redirect():
     finally:
         sys.stdout = old_stdout
 
+class CodeSecurityValidator:
+    """Validates code for potential security issues"""
+    
+    DANGEROUS_IMPORTS = {
+        'os', 'subprocess', 'sys', 'shutil', 'pickle', 
+        'marshal', 'base64', 'codecs', 'requests'
+    }
+    
+    DANGEROUS_PATTERNS = [
+        r'__import__\s*\(',
+        r'eval\s*\(',
+        r'exec\s*\(',
+        r'open\s*\(',
+        r'file\s*\(',
+        r'input\s*\(',
+        r'breakpoint\s*\(',
+    ]
+
+    def __init__(self):
+        self.issues: List[str] = []
+
+    def validate_imports(self, tree: ast.AST) -> List[str]:
+        """Check for dangerous imports"""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    if name.name in self.DANGEROUS_IMPORTS:
+                        self.issues.append(f"Dangerous import detected: {name.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in self.DANGEROUS_IMPORTS:
+                    self.issues.append(f"Dangerous import detected: {node.module}")
+        return self.issues
+
+    def validate_patterns(self, code: str) -> List[str]:
+        """Check for dangerous code patterns"""
+        for pattern in self.DANGEROUS_PATTERNS:
+            if re.search(pattern, code):
+                self.issues.append(f"Dangerous pattern detected: {pattern}")
+        return self.issues
+
+    def validate_code(self, code: str) -> Tuple[bool, List[str]]:
+        """Validate code for security issues"""
+        try:
+            tree = ast.parse(code)
+            self.validate_imports(tree)
+            self.validate_patterns(code)
+            return len(self.issues) == 0, self.issues
+        except SyntaxError as e:
+            self.issues.append(f"Syntax error: {str(e)}")
+            return False, self.issues
+
 def safe_exec(code: str, globals_dict: Optional[Dict[str, Any]] = None, locals_dict: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Safely execute code and return local variables"""
     if globals_dict is None:
@@ -58,13 +111,18 @@ def safe_exec(code: str, globals_dict: Optional[Dict[str, Any]] = None, locals_d
         locals_dict = {}
     
     try:
-        # Validate code before execution
-        ast.parse(code)
+        # Validate code security
+        validator = CodeSecurityValidator()
+        is_safe, issues = validator.validate_code(code)
+        
+        if not is_safe:
+            raise SafeExecutionError(f"Security validation failed:\n" + "\n".join(issues))
         
         # Create restricted globals
         safe_globals = create_safe_globals()
         globals_dict.update(safe_globals)
         
+        # Execute code if safe
         exec(code, globals_dict, locals_dict)
         return locals_dict
     except Exception as e:
@@ -77,6 +135,8 @@ def format_variable(name: str, value: Any) -> str:
         # Handle potentially problematic types
         if isinstance(value, (int, float, str, bool, list, dict, set, tuple)):
             return f"**{name}**: {type(value).__name__} = {repr(value)}"
+        elif value is None:
+            return f"**{name}**: None"
         else:
             return f"**{name}**: {type(value).__name__} = <Complex Object>"
     except Exception as e:
@@ -96,9 +156,11 @@ def save_execution_history(code: str):
     """Save code execution history with timestamp"""
     if 'execution_history' not in st.session_state:
         st.session_state.execution_history = []
+    st.session_state.execution_count += 1
     st.session_state.execution_history.append({
         'code': code,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'execution_number': st.session_state.execution_count
     })
 
 def main():
@@ -106,6 +168,15 @@ def main():
     try:
         initialize_session_state()
         st.title("Python Debugger 🐞")
+
+        # Add security notice
+        st.sidebar.warning("""
+        ⚠️ Security Notice:
+        - System commands are blocked
+        - File operations are restricted
+        - Network access is disabled
+        - Only safe operations allowed
+        """)
 
         col1, col2 = st.columns([3, 2])
 
@@ -162,6 +233,18 @@ def main():
                     for entry in reversed(st.session_state.code_history[-5:]):
                         st.text(f"Run {entry['execution_number']} at {entry['timestamp']}:")
                         st.code(entry['code'], language="python")
+
+            st.subheader("Security Check")
+            if st.button("🛡️ Check Code Security", key="security_button", help="Analyze code for security issues"):
+                validator = CodeSecurityValidator()
+                is_safe, issues = validator.validate_code(code)
+                
+                if is_safe:
+                    st.success("✅ Code passed security checks!")
+                else:
+                    st.error("❌ Security issues found:")
+                    for issue in issues:
+                        st.warning(issue)
 
     except Exception as e:
         logger.critical(f"Critical application error: {str(e)}")

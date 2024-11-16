@@ -1,8 +1,5 @@
 import streamlit as st
-from autocoder import State, optimize_script, validate_api_key, save_final_code, generate_optimization_suggestion, generate_script_map
 import plotly.graph_objects as go
-from aider import chat
-import time
 from tqdm import tqdm
 from typing import Dict, Any, List, Optional
 import ast
@@ -21,6 +18,8 @@ import gc
 import json
 from pathlib import Path
 import tempfile
+import time
+import openai
 
 # Set up logging with file handler for error tracking
 logging.basicConfig(level=logging.INFO)
@@ -199,35 +198,231 @@ def simulate_cloud_workflows():
 def save_app_state(data: dict):
     st.session_state['app_data'] = data
 
-def main():
-    """Cloud-optimized main application"""
+def validate_api_key(api_key: str) -> bool:
+    """Validate OpenAI API key with rate limiting"""
     try:
-        st.set_page_config(page_title="AutocoderAI Cloud", layout="wide")
-        st.title("AutocoderAI Cloud Deployment")
+        # Track API validation attempts
+        if 'api_validations' not in st.session_state:
+            st.session_state.api_validations = []
         
-        # Initialize cloud monitoring
-        if 'cloud_errors' not in st.session_state:
-            st.session_state.cloud_errors = []
+        current_time = time.time()
+        # Clean old validation attempts
+        st.session_state.api_validations = [t for t in st.session_state.api_validations 
+                                          if current_time - t < 60]
+        
+        # Check rate limit (max 10 validations per minute)
+        if len(st.session_state.api_validations) >= 10:
+            logger.warning("API key validation rate limit exceeded")
+            return False
             
-        # Simulate cloud workflows
-        cloud_issues = simulate_cloud_workflows()
-        if cloud_issues:
-            st.warning("Cloud Deployment Issues Detected:")
-            for issue in cloud_issues:
-                st.write(issue)
-                
-        # Resource monitoring
+        st.session_state.api_validations.append(current_time)
+        
+        # Existing validation code
+        openai.api_key = api_key
+        with timeout_handler(seconds=5):
+            response = openai.Completion.create(
+                model="gpt-3.5-turbo-instruct",
+                prompt="test",
+                max_tokens=1
+            )
+            if 'error' in response:
+                return False
+        return True
+    except Exception as e:
+        logger.error(f"API key validation error: {str(e)}")
+        return False
+
+def optimize_script(script: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+    """Optimize code using OpenAI API with resource management"""
+    try:
+        # Check resources before heavy operation
         resources = check_system_resources()
-        if resources["memory_usage"] > MAX_MEMORY_PCT:
-            st.error("⚠️ High memory usage in cloud environment")
+        if resources['memory_usage'] > MAX_MEMORY_PCT * 0.9:  # 90% of threshold
             cleanup_cloud_resources()
             
-        # Rest of the main function implementation...
-        # (Previous main function code continues here)
+        # Existing optimization code
+        prompt = f"""Optimize this Python code for better performance and readability:
+        {script}
+        Return only the optimized code without explanations."""
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a Python optimization expert."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        
+        optimized_code = response.choices[0].message.content.strip()
+        
+        # Store optimization history with memory management
+        if 'optimization_history' not in st.session_state:
+            st.session_state.optimization_history = []
+        
+        # Limit history size to prevent memory issues
+        if len(st.session_state.optimization_history) > 100:
+            st.session_state.optimization_history = st.session_state.optimization_history[-100:]
+            
+        original_lines = len(script.split('\n'))
+        optimized_lines = len(optimized_code.split('\n'))
+        optimization_score = (original_lines - optimized_lines) / original_lines * 100
+        st.session_state.optimization_history.append(optimization_score)
+        
+        return optimized_code
         
     except Exception as e:
-        logger.error(f"Cloud runtime error: {traceback.format_exc()}")
-        st.error(f"Cloud deployment error: {str(e)}")
+        logger.error(f"Optimization error: {str(e)}")
+        raise StreamlitAppError(f"Failed to optimize code: {str(e)}")
+
+def generate_optimization_suggestion(script: str) -> str:
+    """Generate optimization suggestions for the code"""
+    try:
+        prompt = f"""Analyze this Python code and suggest optimization improvements:
+
+{script}
+
+Focus on:
+1. Performance bottlenecks
+2. Code readability
+3. Best practices
+4. Memory usage
+
+Provide specific suggestions."""
+
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a Python optimization expert."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        logger.error(f"Suggestion generation error: {str(e)}")
+        return "Failed to generate suggestions"
+
+def save_final_code(code: str, filename: str = "optimized_code.py"):
+    """Save optimized code to a file in temp directory"""
+    try:
+        temp_path = Path(tempfile.gettempdir()) / filename
+        with open(temp_path, 'w') as f:
+            f.write(code)
+        return str(temp_path)
+    except Exception as e:
+        logger.error(f"Save error: {str(e)}")
+        raise StreamlitAppError(f"Failed to save code: {str(e)}")
+
+def main():
+    """Self-sufficient main application"""
+    try:
+        st.set_page_config(page_title="Code Optimizer", layout="wide")
+        st.title("Python Code Optimizer")
+        
+        # Initialize state
+        if 'api_calls' not in st.session_state:
+            st.session_state.api_calls = []
+        
+        # Resource monitoring
+        resources = check_system_resources()
+        
+        # API Key input
+        api_key = st.text_input("Enter OpenAI API Key", type="password")
+        if api_key:
+            if not validate_api_key(api_key):
+                st.error("Invalid OpenAI API key")
+                return
+            
+        # Settings sidebar
+        st.sidebar.header("Optimization Settings")
+        max_tokens = st.sidebar.slider("Max Tokens", 100, 2000, 1000)
+        temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.7)
+        
+        # Main input
+        script_input = st.text_area("Enter Python Code to Optimize", height=300)
+        
+        if script_input and api_key and st.button("Optimize Code"):
+            with st.spinner("Optimizing code..."):
+                # Validate input
+                issues = validate_script_input(script_input)
+                if issues:
+                    for issue in issues:
+                        st.warning(issue)
+                else:
+                    try:
+                        # Track API call
+                        st.session_state.api_calls.append(time.time())
+                        
+                        # Get optimization suggestions
+                        suggestions = generate_optimization_suggestion(script_input)
+                        
+                        # Optimize code
+                        optimized_code = optimize_script(
+                            script_input,
+                            max_tokens=max_tokens,
+                            temperature=temperature
+                        )
+                        
+                        # Display results
+                        st.success("Code optimized successfully!")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.subheader("Optimization Suggestions")
+                            st.write(suggestions)
+                            
+                        with col2:
+                            st.subheader("Optimized Code")
+                            st.code(optimized_code, language='python')
+                            
+                        # Save button
+                        if st.button("Save Optimized Code"):
+                            save_path = save_final_code(optimized_code)
+                            st.success(f"Code saved to: {save_path}")
+                            
+                    except Exception as e:
+                        st.error(f"Optimization failed: {str(e)}")
+                        logger.error(traceback.format_exc())
+        
+        # Display metrics
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("System Status")
+            st.metric("CPU Usage", f"{resources['cpu_usage']}%")
+            st.metric("Memory Usage", f"{resources['memory_usage']}%")
+            
+        with col2:
+            st.subheader("API Usage")
+            recent_calls = len([t for t in st.session_state.api_calls 
+                              if time.time() - t < 3600])
+            st.metric("API Calls (last hour)", recent_calls)
+        
+        # Show optimization history
+        if 'optimization_history' in st.session_state:
+            st.subheader("Optimization History")
+            fig = go.Figure(data=[
+                go.Scatter(x=list(range(len(st.session_state.optimization_history))),
+                          y=st.session_state.optimization_history,
+                          mode='lines+markers')
+            ])
+            fig.update_layout(
+                xaxis_title="Iteration",
+                yaxis_title="Optimization Score (%)"
+            )
+            st.plotly_chart(fig)
+        
+        # Footer
+        st.markdown("---")
+        st.markdown("Code Optimizer © 2024")
+        
+    except Exception as e:
+        logger.error(f"Application error: {traceback.format_exc()}")
+        st.error(f"Application error: {str(e)}")
         cleanup_cloud_resources()
 
 if __name__ == "__main__":
