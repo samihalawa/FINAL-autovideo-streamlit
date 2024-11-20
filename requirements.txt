@@ -1,33 +1,18 @@
 # Core dependencies
-streamlit>=1.28.0
-openai>=1.3.0
-python-dotenv>=1.0.0
+streamlit
+python-dotenv
 
 # Video processing
-moviepy>=1.0.3
-Pillow>=10.0.0
-numpy>=1.24.0
+moviepy
+yt-dlp
+Pillow
+numpy
 
-# Audio processing
-gTTS>=2.3.2
-pydub>=0.25.1
-requests>=2.31.0
-
-# Image processing
-opencv-python>=4.8.0
-
-# Logging and utilities
-logging>=0.5.1.2
-pathlib>=1.0.1
-
-# Optional performance improvements
-streamlit-cache>=0.1.0
+# File handling and utilities
+requests
+psutil
 
 # Development tools
-black>=23.0.0  # Code formatting
-pylint>=2.17.0  # Code analysis
-pytest>=7.4.0  # Testing 
-
-# Add to existing requirements
-concurrent-futures>=3.0.5
-psutil>=5.9.0  # For memory monitoring
+black
+pylint
+pytest
