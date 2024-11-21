@@ -7,6 +7,7 @@ moviepy
 yt-dlp
 Pillow
 numpy
+openai
 
 # File handling and utilities
 requests
