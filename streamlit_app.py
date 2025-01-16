@@ -1,6 +1,6 @@
 import streamlit as st
 from openai import OpenAI
-import os, logging, tempfile, json, time, shutil, random, gc
+import os, logging, tempfile, json, time, shutil, random, gc, sys
 import moviepy.editor as mpe
 import numpy as np
 from pathlib import Path
@@ -15,8 +15,24 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 st.set_page_config(page_title="AutovideoAI", page_icon="🎥", layout="wide")
+
+# Load environment variables
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("Error: OPENAI_API_KEY environment variable not found. Please set it in your .env file.")
+    st.stop()
+
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "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")
+if not HUGGINGFACE_API_KEY:
+    st.error("Error: HUGGINGFACE_API_KEY environment variable not found.")
+    st.stop()
+
+try:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+except Exception as e:
+    st.error(f"Error initializing OpenAI client: {str(e)}")
+    st.stop()
 
 # Constants
 MUSIC_TRACKS = {
@@ -90,23 +106,109 @@ def select_background_music(genre):
     try:
         track_url = MUSIC_TRACKS.get(genre, random.choice(list(MUSIC_TRACKS.values())))
         response = requests.get(track_url, timeout=10)
-        if response.status_code == 200 and 'audio' in response.headers.get('content-type', ''):
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            temp_file.write(response.content)
-            temp_file.close()
-            try:
-                mpe.AudioFileClip(temp_file.name)
-                return temp_file.name
-            except:
+        if response.status_code != 200 or 'audio' not in response.headers.get('content-type', ''):
+            logger.error(f"Invalid music track response for {genre}: Status {response.status_code}, Content-Type: {response.headers.get('content-type')}")
+            st.warning(f"Could not load music track for {genre}. Using default audio.")
+            return None
+            
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        temp_file.write(response.content)
+        temp_file.close()
+        
+        try:
+            audio_clip = mpe.AudioFileClip(temp_file.name)
+            if audio_clip.duration < 1:
+                raise ValueError("Audio file too short")
+            audio_clip.close()
+            return temp_file.name
+        except Exception as e:
+            logger.error(f"Error validating audio file: {e}")
+            if os.path.exists(temp_file.name):
                 os.unlink(temp_file.name)
-        return None
+            return None
+            
     except Exception as e:
         logger.error(f"Error selecting music: {e}")
+        st.warning("Could not load background music. Continuing without music.")
         return None
+
+def validate_storyboard(storyboard):
+    """Validate the structure and content of a storyboard"""
+    try:
+        if not isinstance(storyboard, dict):
+            raise ValueError("Invalid storyboard format: not a dictionary")
+            
+        # Check required top-level fields
+        required_fields = ["title", "scenes"]
+        missing_fields = [f for f in required_fields if f not in storyboard]
+        if missing_fields:
+            raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
+            
+        # Validate title
+        if not isinstance(storyboard["title"], str) or len(storyboard["title"].strip()) == 0:
+            raise ValueError("Invalid or empty title")
+            
+        # Validate scenes
+        if not isinstance(storyboard["scenes"], list) or len(storyboard["scenes"]) == 0:
+            raise ValueError("Storyboard must contain at least one scene")
+            
+        total_duration = 0
+        for i, scene in enumerate(storyboard["scenes"]):
+            # Check scene structure
+            if not isinstance(scene, dict):
+                raise ValueError(f"Scene {i+1} is not a dictionary")
+                
+            # Check required scene fields
+            required_scene_fields = ["title", "description", "narration", "duration"]
+            missing_scene_fields = [f for f in required_scene_fields if f not in scene]
+            if missing_scene_fields:
+                raise ValueError(f"Scene {i+1} missing required fields: {', '.join(missing_scene_fields)}")
+                
+            # Validate text fields
+            for field in ["title", "description", "narration"]:
+                if not isinstance(scene[field], str) or len(scene[field].strip()) == 0:
+                    raise ValueError(f"Scene {i+1} has invalid or empty {field}")
+                    
+            # Validate and normalize duration
+            try:
+                duration = float(scene["duration"])
+                if duration <= 0:
+                    logger.warning(f"Scene {i+1} has invalid duration, setting to default")
+                    scene["duration"] = 5.0
+                elif duration > 30:
+                    logger.warning(f"Scene {i+1} duration too long, capping at 30 seconds")
+                    scene["duration"] = 30.0
+                else:
+                    scene["duration"] = duration
+            except (ValueError, TypeError):
+                logger.warning(f"Scene {i+1} has invalid duration, setting to default")
+                scene["duration"] = 5.0
+                
+            total_duration += scene["duration"]
+            
+        # Check total duration
+        if total_duration > 180:  # 3 minutes max
+            raise ValueError(f"Total video duration ({total_duration}s) exceeds maximum limit of 180s")
+            
+        return True, storyboard
+        
+    except ValueError as e:
+        return False, str(e)
+    except Exception as e:
+        logger.error(f"Unexpected error in storyboard validation: {e}")
+        return False, "Unexpected error in storyboard validation"
 
 def generate_storyboard(prompt, style="motivational"):
     try:
         from prompts.autovideo_prompt import SYSTEM_PROMPT
+        
+        # Validate inputs
+        if not prompt or len(prompt.strip()) == 0:
+            raise ValueError("Empty prompt provided")
+            
+        if not style or style not in [s.lower() for s in VIDEO_STYLES.keys()]:
+            style = "motivational"  # Default to motivational if invalid style
+            
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
@@ -116,9 +218,26 @@ def generate_storyboard(prompt, style="motivational"):
             response_format={"type": "json_object"},
             temperature=0.7
         )
-        return json.loads(response.choices[0].message.content)
+        
+        try:
+            storyboard = json.loads(response.choices[0].message.content)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in storyboard: {e}")
+            st.error("Error parsing storyboard response. Please try again.")
+            return None
+            
+        # Validate the storyboard
+        is_valid, result = validate_storyboard(storyboard)
+        if not is_valid:
+            logger.error(f"Storyboard validation failed: {result}")
+            st.error(f"Invalid storyboard generated: {result}")
+            return None
+            
+        return result
+        
     except Exception as e:
         logger.error(f"Storyboard generation error: {e}")
+        st.error("An unexpected error occurred while generating the storyboard. Please try again.")
         return None
 
 def create_enhanced_scene_clip(scene, style_config, duration=5):
@@ -148,16 +267,64 @@ def enhanced_cleanup_context():
         # Close all clips first
         for clip in clips:
             try:
-                clip.close()
-            except:
-                pass
+                if hasattr(clip, 'close'):
+                    clip.close()
+                if hasattr(clip, 'audio') and hasattr(clip.audio, 'close'):
+                    clip.audio.close()
+            except Exception as e:
+                logger.error(f"Error closing clip: {e}")
+        
         # Then delete temp files
         for f in temp_files:
             try:
-                if os.path.exists(f): os.unlink(f)
+                if os.path.exists(f):
+                    os.unlink(f)
+                    logger.info(f"Cleaned up temp file: {f}")
             except Exception as e:
-                logger.error(f"Cleanup error: {e}")
+                logger.error(f"Cleanup error for {f}: {e}")
+        
+        # Clear memory
         gc.collect()
+
+def cleanup_session_files():
+    """Clean up any temporary files from the session"""
+    if 'temp_files' in st.session_state:
+        for f in st.session_state.temp_files:
+            try:
+                if os.path.exists(f):
+                    os.unlink(f)
+                    logger.info(f"Cleaned up session file: {f}")
+            except Exception as e:
+                logger.error(f"Session cleanup error for {f}: {e}")
+        st.session_state.temp_files = set()
+
+def register_cleanup_handler():
+    """Register cleanup handler for the session"""
+    if not st.session_state.get('cleanup_registered'):
+        st.session_state.cleanup_registered = True
+        cleanup_session_files()
+        # Register cleanup for when the script reruns
+        st.session_state.temp_files = set()
+        
+def cleanup_old_files(max_age_hours=24):
+    """Clean up old temporary files"""
+    try:
+        temp_dir = tempfile.gettempdir()
+        current_time = time.time()
+        
+        for filename in os.listdir(temp_dir):
+            if filename.endswith('.mp4') or filename.endswith('.mp3'):
+                filepath = os.path.join(temp_dir, filename)
+                try:
+                    # Check file age
+                    file_age = current_time - os.path.getctime(filepath)
+                    if file_age > (max_age_hours * 3600):
+                        os.unlink(filepath)
+                        logger.info(f"Cleaned up old file: {filepath}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up old file {filepath}: {e}")
+    except Exception as e:
+        logger.error(f"Error during old files cleanup: {e}")
 
 def create_video(storyboard, background_music_file):
     with enhanced_cleanup_context() as (temp_files, clips):
@@ -166,7 +333,7 @@ def create_video(storyboard, background_music_file):
                 raise ValueError("Invalid storyboard format")
                 
             clips = []
-            for scene in storyboard['scenes']:
+            for scene_idx, scene in enumerate(storyboard['scenes']):
                 try:
                     clip = create_enhanced_scene_clip(
                         scene, 
@@ -174,15 +341,21 @@ def create_video(storyboard, background_music_file):
                         float(scene.get('duration', 5))
                     )
                     
-                    if clip:
-                        narration_file, _ = generate_voiceover(scene['narration'])
-                        if narration_file:
-                            temp_files.append(narration_file)
-                            narration = mpe.AudioFileClip(narration_file)
-                            clip = clip.set_audio(narration)
-                            clips.append(clip)
+                    if not clip:
+                        raise ValueError(f"Failed to create clip for scene {scene_idx + 1}")
+                    
+                    narration_file, _ = generate_voiceover(scene['narration'])
+                    if narration_file:
+                        temp_files.append(narration_file)
+                        narration = mpe.AudioFileClip(narration_file)
+                        clip = clip.set_audio(narration)
+                        clips.append(clip)
+                    else:
+                        logger.warning(f"No narration for scene {scene_idx + 1}")
+                        clips.append(clip)
                 except Exception as e:
-                    logger.error(f"Scene creation error: {e}")
+                    logger.error(f"Error creating scene {scene_idx + 1}: {e}")
+                    st.warning(f"Error in scene {scene_idx + 1}. Skipping...")
                     continue
             
             if not clips:
@@ -200,6 +373,7 @@ def create_video(storyboard, background_music_file):
                     clips.append(bg_music)
                 except Exception as e:
                     logger.warning(f"Background music error: {e}")
+                    st.warning("Could not add background music. Continuing with narration only.")
             
             output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
             temp_files.append(output_file)
@@ -212,6 +386,10 @@ def create_video(storyboard, background_music_file):
                 logger=None
             )
             clips.append(final_clip)
+            
+            # Add to session state for cleanup
+            st.session_state.temp_files.add(output_file)
+            
             return output_file
             
         except Exception as e:
@@ -232,7 +410,10 @@ def generate_voiceover(text):
 
 def verify_environment():
     issues = []
-    if not os.getenv("OPENAI_API_KEY"): issues.append("OpenAI API key not found")
+    if not os.getenv("OPENAI_API_KEY"): 
+        issues.append("OpenAI API key not found")
+    if not os.getenv("HUGGINGFACE_API_KEY"):
+        issues.append("Hugging Face API key not found")
     for pkg in ['moviepy', 'gtts']:
         try: __import__(pkg)
         except ImportError: issues.append(f"{pkg} not installed")
@@ -241,12 +422,20 @@ def verify_environment():
 def check_disk_space(required_mb=500):
     try:
         _, _, free = shutil.disk_usage(tempfile.gettempdir())
-        return free // (2**20) >= required_mb
+        free_mb = free // (2**20)
+        if free_mb < required_mb:
+            st.error(f"Insufficient disk space. Required: {required_mb}MB, Available: {free_mb}MB")
+            st.stop()
+        return True
     except Exception as e:
-        logger.error(f"Disk space check error: {e}")
+        st.error(f"Error checking disk space: {str(e)}")
+        st.stop()
         return False
 
 def initialize_session_state():
+    # Check disk space first
+    check_disk_space()
+    
     defaults = {
         'initialized': True,
         'current_step': 1,
@@ -283,6 +472,8 @@ def validate_environment(func):
 @validate_environment
 def main():
     initialize_session_state()
+    register_cleanup_handler()
+    cleanup_old_files()  # Clean up old files at startup
     
     st.title("🎥 AutovideoAI")
     st.subheader("Create Professional Videos with AI")
@@ -307,7 +498,7 @@ def main():
         
         music_style = st.selectbox(
             "Select Music Style",
-            options=list(MUSIC_TRACKS.keys()),
+            options=["Creative Commons Music", "User Upload", "None"],
             key="music_style"
         )
 
