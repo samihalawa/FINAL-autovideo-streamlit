@@ -410,13 +410,11 @@ def generate_voiceover(text):
 
 def verify_environment():
     issues = []
-    if not os.getenv("OPENAI_API_KEY"): 
-        issues.append("OpenAI API key not found")
-    if not os.getenv("HUGGINGFACE_API_KEY"):
-        issues.append("Hugging Face API key not found")
-    for pkg in ['moviepy', 'gtts']:
+    for pkg in ['moviepy', 'yt_dlp', 'pytube', 'requests']:
         try: __import__(pkg)
         except ImportError: issues.append(f"{pkg} not installed")
+    if not os.getenv("HUGGINGFACE_API_KEY"):
+        issues.append("Hugging Face API key not found in environment variables")
     return issues
 
 def check_disk_space(required_mb=500):
