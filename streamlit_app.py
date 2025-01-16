@@ -162,35 +162,61 @@ def enhanced_cleanup_context():
 def create_video(storyboard, background_music_file):
     with enhanced_cleanup_context() as (temp_files, clips):
         try:
+            if not storyboard or 'scenes' not in storyboard:
+                raise ValueError("Invalid storyboard format")
+                
             clips = []
             for scene in storyboard['scenes']:
-                clip = create_enhanced_scene_clip(scene, get_cached_style_config(st.session_state.video_style), float(scene.get('duration', 5)))
-                if clip:
-                    narration_file, _ = generate_voiceover(scene['narration'])
-                    if narration_file:
-                        temp_files.append(narration_file)
-                        narration = mpe.AudioFileClip(narration_file)
-                        clip = clip.set_audio(narration)
-                        clips.append(clip)
+                try:
+                    clip = create_enhanced_scene_clip(
+                        scene, 
+                        get_cached_style_config(st.session_state.video_style),
+                        float(scene.get('duration', 5))
+                    )
+                    
+                    if clip:
+                        narration_file, _ = generate_voiceover(scene['narration'])
+                        if narration_file:
+                            temp_files.append(narration_file)
+                            narration = mpe.AudioFileClip(narration_file)
+                            clip = clip.set_audio(narration)
+                            clips.append(clip)
+                except Exception as e:
+                    logger.error(f"Scene creation error: {e}")
+                    continue
             
             if not clips:
-                raise Exception("No video clips could be generated")
+                raise Exception("No valid video clips could be generated")
                 
             final_clip = mpe.concatenate_videoclips(clips)
+            
             if background_music_file:
-                bg_music = mpe.AudioFileClip(background_music_file).volumex(0.1)
-                bg_music = bg_music.loop(duration=final_clip.duration)
-                final_clip = final_clip.set_audio(mpe.CompositeAudioClip([final_clip.audio, bg_music]))
-                clips.append(bg_music)
+                try:
+                    bg_music = mpe.AudioFileClip(background_music_file).volumex(0.1)
+                    bg_music = bg_music.loop(duration=final_clip.duration)
+                    final_clip = final_clip.set_audio(
+                        mpe.CompositeAudioClip([final_clip.audio, bg_music])
+                    )
+                    clips.append(bg_music)
+                except Exception as e:
+                    logger.warning(f"Background music error: {e}")
             
             output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
             temp_files.append(output_file)
-            final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac', fps=24, logger=None)
+            
+            final_clip.write_videofile(
+                output_file,
+                codec='libx264',
+                audio_codec='aac',
+                fps=24,
+                logger=None
+            )
             clips.append(final_clip)
             return output_file
+            
         except Exception as e:
             logger.error(f"Video creation error: {e}")
-            st.error("Error creating video. Please try again.")
+            st.error(f"Error creating video: {str(e)}")
             return None
 
 def generate_voiceover(text):
@@ -221,92 +247,205 @@ def check_disk_space(required_mb=500):
         return False
 
 def initialize_session_state():
-    if 'initialized' not in st.session_state:
-        st.session_state.update({
-            'initialized': True,
-            'current_step': 1,
-            'storyboard': None,
-            'video_style': 'Motivational',
-            'voice_option': list(VOICE_OPTIONS.keys())[0],
-            'music_style': 'Electronic',
-            'temp_files': set(),
-            'last_prompt': None,
-            'processing_error': None
-        })
+    defaults = {
+        'initialized': True,
+        'current_step': 1,
+        'storyboard': None,
+        'video_style': 'Motivational',
+        'voice_option': list(VOICE_OPTIONS.keys())[0],
+        'music_style': 'Electronic',
+        'temp_files': set(),
+        'last_prompt': None,
+        'processing_error': None,
+        'generation_complete': False
+    }
+    
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
+# Add validation decorator
+def validate_environment(func):
+    def wrapper(*args, **kwargs):
+        issues = verify_environment()
+        if issues:
+            st.error("Setup Issues Detected:")
+            for issue in issues:
+                st.warning(issue)
+            return
+        if not check_disk_space():
+            st.error("Insufficient disk space. Please free up at least 500MB.")
+            return
+        return func(*args, **kwargs)
+    return wrapper
+
+# Improved main UI layout
+@validate_environment
 def main():
     initialize_session_state()
-    issues = verify_environment()
-    if issues:
-        st.error("Setup Issues Detected:")
-        for issue in issues: st.warning(issue)
-        return
-        
-    if not check_disk_space():
-        st.error("Insufficient disk space. Please free up at least 500MB.")
-        return
-
+    
     st.title("🎥 AutovideoAI")
     st.subheader("Create Professional Videos with AI")
     
+    # Sidebar configuration
     with st.sidebar:
         progress_bar = st.progress(0)
         st.markdown("---")
-        video_style = st.selectbox("Select Video Style", options=list(VIDEO_STYLES.keys()))
-        voice_option = st.selectbox("Select Voice", options=list(VOICE_OPTIONS.keys()), format_func=lambda x: VOICE_OPTIONS[x])
+        
+        video_style = st.selectbox(
+            "Select Video Style",
+            options=list(VIDEO_STYLES.keys()),
+            key="video_style"
+        )
+        
+        voice_option = st.selectbox(
+            "Select Voice",
+            options=list(VOICE_OPTIONS.keys()),
+            format_func=lambda x: VOICE_OPTIONS[x],
+            key="voice_option"
+        )
+        
+        music_style = st.selectbox(
+            "Select Music Style",
+            options=list(MUSIC_TRACKS.keys()),
+            key="music_style"
+        )
 
+    # Main content area
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        if st.session_state.current_step == 1:
-            st.subheader("1. Enter Your Video Prompt")
-            sample_prompts = load_sample_prompts()
-            selected_prompt = st.selectbox("Or choose a sample prompt:", options=[""] + sample_prompts[video_style], key="sample_prompt")
-            prompt = st.text_area("Enter your video prompt:", value=selected_prompt, height=100)
-            
-            if st.button("Generate Storyboard", type="primary") and prompt:
-                with st.spinner("Generating storyboard..."):
-                    st.session_state.storyboard = generate_storyboard(prompt, video_style.lower())
-                    if st.session_state.storyboard:
-                        st.session_state.current_step = 2
-                        progress_bar.progress(0.33)
-            
-        elif st.session_state.current_step == 2:
-            st.subheader("2. Review and Customize")
-            if st.session_state.storyboard:
-                st.json(st.session_state.storyboard)
-                if st.button("Generate Video", type="primary"):
-                    st.session_state.current_step = 3
-                    progress_bar.progress(0.66)
-                if st.button("Back", type="secondary"):
-                    st.session_state.current_step = 1
-                    progress_bar.progress(0)
-                    
-        elif st.session_state.current_step == 3:
-            st.subheader("3. Generate Video")
-            with st.spinner("Creating video..."):
-                video_file = create_video(st.session_state.storyboard, select_background_music(st.session_state.get('music_style')))
-                if video_file:
-                    st.success("Video created!")
-                    st.video(video_file)
-                    progress_bar.progress(1.0)
-                    
-                    with open(video_file, "rb") as f:
-                        st.download_button("Download Video", f, "video.mp4", "video/mp4")
-                    
-                    if st.button("Create Another"): 
-                        st.session_state.current_step = 1
-                        progress_bar.progress(0)
-                else:
-                    st.error("Generation failed")
-                    if st.button("Retry"):
-                        st.session_state.current_step = 2
-                        progress_bar.progress(0.33)
-
+        render_main_content(progress_bar)
+        
     with col2:
-        st.subheader("Style Preview")
-        st.markdown(f"**{video_style}**\n{VIDEO_STYLES[video_style]['description']}")
-        st.markdown("---\n### Features\n- Professional transitions\n- Custom color scheme\n- AI-powered narration\n- Royalty-free music")
+        render_style_preview(video_style)
+
+def render_main_content(progress_bar):
+    if st.session_state.current_step == 1:
+        render_step_one(progress_bar)
+    elif st.session_state.current_step == 2:
+        render_step_two(progress_bar)
+    elif st.session_state.current_step == 3:
+        render_step_three(progress_bar)
+
+def render_step_one(progress_bar):
+    st.subheader("1. Enter Your Video Prompt")
+    sample_prompts = load_sample_prompts()
+    selected_prompt = st.selectbox(
+        "Or choose a sample prompt:",
+        options=[""] + sample_prompts[st.session_state.video_style],
+        key="sample_prompt"
+    )
+    
+    prompt = st.text_area("Enter your video prompt:", value=selected_prompt, height=100)
+    
+    if st.button("Generate Storyboard", type="primary") and prompt:
+        with st.spinner("Generating storyboard..."):
+            st.session_state.storyboard = generate_storyboard(
+                prompt,
+                st.session_state.video_style.lower()
+            )
+            if st.session_state.storyboard:
+                st.session_state.current_step = 2
+                progress_bar.progress(0.33)
+
+def render_step_two(progress_bar):
+    st.subheader("2. Review and Customize")
+    if st.session_state.storyboard:
+        # Display storyboard in a more readable format
+        with st.expander("View Storyboard Details", expanded=True):
+            st.json(st.session_state.storyboard)
+        
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col1:
+            if st.button("Generate Video", type="primary"):
+                st.session_state.current_step = 3
+                progress_bar.progress(0.66)
+        with col2:
+            if st.button("Back", type="secondary"):
+                st.session_state.current_step = 1
+                progress_bar.progress(0)
+        with col3:
+            if st.button("Regenerate Storyboard"):
+                if st.session_state.last_prompt:
+                    with st.spinner("Regenerating storyboard..."):
+                        st.session_state.storyboard = generate_storyboard(
+                            st.session_state.last_prompt,
+                            st.session_state.video_style.lower()
+                        )
+
+def render_step_three(progress_bar):
+    st.subheader("3. Generate Video")
+    
+    if not st.session_state.generation_complete:
+        with st.spinner("Creating video..."):
+            video_file = create_video(
+                st.session_state.storyboard, 
+                select_background_music(st.session_state.music_style)
+            )
+            if video_file:
+                st.session_state.generation_complete = True
+                st.session_state.video_file = video_file
+                st.success("Video created successfully!")
+                progress_bar.progress(1.0)
+            else:
+                st.error("Video generation failed")
+                if st.button("Retry"):
+                    st.session_state.current_step = 2
+                    progress_bar.progress(0.33)
+                return
+    
+    if st.session_state.generation_complete:
+        st.video(st.session_state.video_file)
+        
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            with open(st.session_state.video_file, "rb") as f:
+                st.download_button(
+                    "Download Video",
+                    f,
+                    "video.mp4",
+                    "video/mp4",
+                    use_container_width=True
+                )
+        with col2:
+            if st.button("Create Another Video", use_container_width=True):
+                st.session_state.current_step = 1
+                st.session_state.generation_complete = False
+                st.session_state.storyboard = None
+                progress_bar.progress(0)
+
+def render_style_preview(video_style):
+    st.subheader("Style Preview")
+    
+    # Display style information
+    st.markdown(f"**{video_style}**")
+    st.markdown(VIDEO_STYLES[video_style]['description'])
+    
+    # Display style features
+    st.markdown("---")
+    st.markdown("### Features")
+    
+    # Create two columns for features
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("🎨 **Visual Style**")
+        colors = VIDEO_STYLES[video_style]['color_scheme']
+        st.markdown(f"- Primary: `{colors[0]}`")
+        st.markdown(f"- Secondary: `{colors[1]}`")
+        
+        st.markdown("🎬 **Transitions**")
+        for transition in VIDEO_STYLES[video_style]['transitions']:
+            st.markdown(f"- {transition.title()}")
+    
+    with col2:
+        st.markdown("⏱️ **Duration**")
+        st.markdown(f"- Default: {VIDEO_STYLES[video_style]['default_duration']}s")
+        
+        st.markdown("🎵 **Audio**")
+        st.markdown("- AI narration")
+        st.markdown("- Background music")
 
 if __name__ == "__main__":
     main()
