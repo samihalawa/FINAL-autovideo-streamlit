@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+moviepy
+huggingface_hub
+pydantic
+gradio
+faster-whisper
+pysrt
+pydub
+soundfile
+requests
