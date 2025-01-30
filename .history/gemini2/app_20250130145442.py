@@ -25,7 +25,7 @@ for dir in [VIDEO_OUTPUT_DIR, TEMP_DIR]:
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-BACKGROUND_MUSIC_PATH = os.path.join("placeholder_music", "background.wav")
+BACKGROUND_MUSIC_PATH = "placeholder_music/background.wav"
 if not os.path.exists("placeholder_music"):
     os.makedirs("placeholder_music")
     
@@ -197,68 +197,47 @@ async def assemble_video(video_clip_paths: List[str], voiceover_audio_path: str,
         video_clips = [mpe.VideoFileClip(clip_path).subclip(0, 5)  # Max 5s per clip
                       for clip_path in video_clip_paths]
         voiceover_clip = mpe.AudioFileClip(voiceover_audio_path)
-        background_music_clip = mpe.AudioFileClip(music_path)
+        background_music_clip = mpe.AudioFileClip(music_path).fx(mpe.afx.audio_normalize)
 
         # Basic Transitions
         transition_duration = 0.4
         clips_with_transitions = []
         for i, clip in enumerate(video_clips):
             if i > 0:
-                clips_with_transitions.append(
-                    clip.crossfadein(transition_duration).crossfadeout(transition_duration)
-                )
+                clips_with_transitions.append(clip.fx(mpe.transitions.crossfadein, transition_duration).fx(mpe.transitions.crossfadeout, transition_duration))
             else:
-                # For first clip, just use regular clip
-                clips_with_transitions.append(clip)
+                clips_with_transitions.append(clip.fx(mpe.afx.fadein, transition_duration).fx(mpe.afx.fadeout, transition_duration))
 
         final_video_duration = sum(clip.duration for clip in clips_with_transitions)
-        
-        # Adjust background music
-        background_music_clip = (background_music_clip
-                               .subclip(0, final_video_duration)
-                               .volumex(0.3))
-        
-        # Combine audio tracks
-        final_audio = mpe.CompositeAudioClip([
-            voiceover_clip,
-            background_music_clip
-        ])
-        
-        # Concatenate video clips and set audio
+        background_music_clip = background_music_clip.subclip(0, final_video_duration).volumex(0.3)
+        final_audio = mpe.CompositeAudioClip([voiceover_clip, background_music_clip])
         final_video = mpe.concatenate_videoclips(clips_with_transitions)
+
         final_video = final_video.set_audio(final_audio)
         final_video = final_video.resize(height=720)  # Limit to 720p
 
-        # Write final video
-        final_video.write_videofile(
-            output_filepath, 
-            codec="libx264", 
-            audio_codec="aac", 
-            fps=24, 
-            preset='medium', 
-            bitrate="1000k",
-            threads=4
-        )
-        
-        # Clean up
-        final_video.close()
+        final_video.write_videofile(output_filepath, 
+                                  codec="libx264", 
+                                  audio_codec="aac", 
+                                  fps=24, 
+                                  preset='medium', 
+                                  bitrate="1000k",  # Reduced from 3000k
+                                  threads=4)
+        final_video.close() # Explicitly close video clips to release resources
         voiceover_clip.close()
         background_music_clip.close()
         for clip in video_clips:
-            clip.close()
-            
+             clip.close()
         logging.info("Video assembled successfully.")
-        
     except Exception as e:
-        logging.error(f"Error during video assembly: {e}")
-        raise Exception(f"Video assembly failed: {e}")
+       logging.error(f"Error during video assembly: {e}")
+       raise Exception(f"Video assembly failed: {e}")
     finally:
         # Ensure resources are cleaned up
         for clip in video_clips:
             try:
                 clip.close()
-                if os.path.exists(clip.filename):
-                    os.remove(clip.filename)
+                os.remove(clip.filename)
             except Exception as e:
                 logging.warning(f"Error cleaning up {clip.filename}: {e}")
 
@@ -395,15 +374,11 @@ if __name__ == "__main__":
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
             
-    # Remove the placeholder file creation since we now generate proper WAV audio
+    # Create placeholder music file if it doesn't exist
     if not os.path.exists(BACKGROUND_MUSIC_PATH):
-        sample_rate = 44100
-        duration = 60
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        tone = np.sin(2*np.pi*440*t) * 0.3 + np.sin(2*np.pi*550*t) * 0.2
-        tone = tone * 0.5
-        sf.write(BACKGROUND_MUSIC_PATH, tone, sample_rate)
-    
+        with open(BACKGROUND_MUSIC_PATH, 'w') as f:
+            f.write("Placeholder music file")
+            
     # Mount Gradio app to FastAPI
     app = gr.mount_gradio_app(app, demo, path="/")
     

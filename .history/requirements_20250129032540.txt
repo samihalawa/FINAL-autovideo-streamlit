@@ -3,14 +3,14 @@ streamlit
 python-dotenv==1.0.1
 
 # Video processing
-moviepy>=1.0.3
-yt-dlp>=2023.12.30
+moviepy==1.0.3
+yt-dlp
 Pillow==10.2.0
-numpy>=1.24.0
+numpy==1.26.4
 openai
 
 # File handling and utilities
-requests>=2.31.0
+requests==2.31.0
 psutil
 
 # Development tools
@@ -20,11 +20,8 @@ pytest
 
 # Added from the code block
 huggingface_hub==0.20.3
-gradio>=4.0.0
+gradio==4.19.2
 faster-whisper==0.10.0
-pysrt>=1.1.2
-pydub>=0.25.1
-soundfile>=0.12.1
-fastapi>=0.109.0
-uvicorn>=0.27.0
-python-multipart>=0.0.6
+pysrt==1.1.2
+pydub==0.25.1
+soundfile==0.12.1
