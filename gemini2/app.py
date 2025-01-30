@@ -34,30 +34,32 @@ if not os.path.exists("placeholder_music"):
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def download_youtube_clips(query: str, num_clips: int = 3) -> List[str]:
-    """Downloads video clips from YouTube based on the query."""
+def download_youtube_clips(search_keywords: list, num_clips: int = 3) -> List[str]:
+    """Downloads videos using AI-generated keywords."""
     try:
-        logging.info(f"Downloading video clips from YouTube for query: '{query}'")
+        logging.info(f"Downloading video clips from YouTube for search keywords: {search_keywords[:3]}")
         video_paths = []
 
         ydl_opts = {
-            'format': 'best[ext=mp4][filesize<50M]',  # Limit to 50MB files
+            'format': 'best[ext=mp4][filesize<10M]',  # Reduced from 50MB
             'outtmpl': os.path.join(TEMP_DIR, '%(title)s.%(ext)s'),
-            'max_downloads': num_clips,
+            'playlistend': num_clips,  # Correct parameter name
             'quiet': True,
-            'match_filter': lambda info: info['duration'] < 180,  # Max 3 minutes
-            'max_filesize': 50 * 1024 * 1024  # 50MB in bytes
+            'match_filter': lambda info: info['duration'] < 30,  # Reduced from 180s
+            'max_filesize': 10 * 1024 * 1024  # 10MB
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                results = ydl.extract_info(f"ytsearch{num_clips}:{query}", download=True)
-                if 'entries' in results:
-                    for entry in results['entries']:
-                        if entry:
-                            video_path = ydl.prepare_filename(entry)
-                            if os.path.exists(video_path) and os.path.getsize(video_path) < 50 * 1024 * 1024:  # 50MB
-                                video_paths.append(video_path)
+                for keyword in search_keywords[:3]:  # Use top 3 keywords
+                    # Modified YouTube search with keywords
+                    results = ydl.extract_info(f"ytsearch{num_clips}:{keyword}", download=True)
+                    if 'entries' in results:
+                        for entry in results['entries']:
+                            if entry:
+                                video_path = ydl.prepare_filename(entry)
+                                if os.path.exists(video_path) and os.path.getsize(video_path) < 10 * 1024 * 1024:  # 10MB
+                                    video_paths.append(video_path)
             except Exception as e:
                 logging.error(f"Error downloading from YouTube: {e}")
                 return create_placeholder_videos(num_clips)
@@ -72,14 +74,14 @@ def download_youtube_clips(query: str, num_clips: int = 3) -> List[str]:
 
 def create_placeholder_videos(num_clips: int) -> List[str]:
     """Creates multiple placeholder video files."""
-        placeholder_files = []
+    placeholder_files = []
     for i in range(num_clips):
         filename = os.path.join(TEMP_DIR, f'placeholder_{i}.mp4')
         duration = random.randint(3, 5)
         place_holder_filename = create_placeholder_video(duration, filename)
-                if place_holder_filename:
-                     placeholder_files.append(place_holder_filename)
-        return placeholder_files
+        if place_holder_filename:
+            placeholder_files.append(place_holder_filename)
+    return placeholder_files
 
 def create_placeholder_video(duration: int, filename: str) -> str:
     """Creates a placeholder video file."""
@@ -100,23 +102,57 @@ def create_placeholder_video(duration: int, filename: str) -> str:
         logging.error(f"Error creating placeholder video: {e}")
         return None
 
-async def generate_script_from_topic(topic: str) -> str:
-    """Generates a simple script from a topic."""
+async def generate_script_from_topic(topic: str) -> dict:
+    """Generates structured JSON script with video search keywords."""
     try:
-        logging.info(f"Generating script for topic: '{topic}'")
-        # Simple template-based script generation
-        script = f"""Here's a fascinating look at {topic}.
+        logging.info(f"Generating AI-powered script for: '{topic}'")
         
-        This amazing subject captures our imagination and shows us new possibilities.
+        # Example API call - replace with your actual AI service integration
+        prompt = f"""Create a 60-second video script about {topic} with:
+- 1 title
+- 3-5 scenes with visual descriptions 
+- 5 search keywords for video clips
+- Concise voiceover text for each scene
+Output MUST be valid JSON matching this schema:
+{{
+  "title": str,
+  "scenes": [
+    {{
+      "scene_number": int,
+      "visual_description": str,
+      "search_keywords": list[str],
+      "voiceover_text": str,
+      "duration_seconds": float  
+    }}
+  ],
+  "total_duration": float
+}}"""
         
-        Let's explore the key aspects and discover what makes {topic} so special.
+        # Example API response simulation
+        script_json = {
+            "title": f"Exploring {topic}",
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "visual_description": "Opening scene showing key concept",
+                    "search_keywords": [f"introduction {topic}", "basic concepts"],
+                    "voiceover_text": "Let's begin our journey into...",
+                    "duration_seconds": 10.5
+                },
+                # ... more scenes
+            ],
+            "total_duration": 60.0
+        }
         
-        Thank you for watching this journey into {topic}."""
+        # Validate JSON structure
+        if not all(key in script_json for key in ("title", "scenes", "total_duration")):
+            raise ValueError("Invalid script structure from AI")
+            
+        return script_json
         
-        return script
     except Exception as e:
-        logging.error(f"Error during script generation: {e}")
-        raise Exception(f"Script generation failed: {e}")
+        logging.error(f"Script generation failed: {e}")
+        raise Exception(f"AI script creation error: {e}")
 
 async def generate_voiceover_from_text(text: str) -> str:
     """Generates a simple beep sound as voiceover."""
@@ -132,7 +168,7 @@ async def generate_voiceover_from_text(text: str) -> str:
         voiceover_audio_path = os.path.join(TEMP_DIR, "voiceover.wav")
         sf.write(voiceover_audio_path, tone, sample_rate)
         
-         return voiceover_audio_path
+        return voiceover_audio_path
     except Exception as e:
         logging.error(f"Error during voiceover generation: {e}")
         raise Exception(f"Voiceover generation failed: {e}")
@@ -150,7 +186,8 @@ async def assemble_video(video_clip_paths: List[str], voiceover_audio_path: str,
             else:
                 raise Exception("Failed to create placeholder video")
         
-        video_clips = [mpe.VideoFileClip(clip_path) for clip_path in video_clip_paths]
+        video_clips = [mpe.VideoFileClip(clip_path).subclip(0, 5)  # Max 5s per clip
+                      for clip_path in video_clip_paths]
         voiceover_clip = mpe.AudioFileClip(voiceover_audio_path)
         background_music_clip = mpe.AudioFileClip(music_path).fx(mpe.afx.audio_normalize)
 
@@ -169,8 +206,15 @@ async def assemble_video(video_clip_paths: List[str], voiceover_audio_path: str,
         final_video = mpe.concatenate_videoclips(clips_with_transitions)
 
         final_video = final_video.set_audio(final_audio)
+        final_video = final_video.resize(height=720)  # Limit to 720p
 
-        final_video.write_videofile(output_filepath, codec="libx264", audio_codec="aac", fps=24, preset='medium', bitrate="3000k", threads=4)
+        final_video.write_videofile(output_filepath, 
+                                  codec="libx264", 
+                                  audio_codec="aac", 
+                                  fps=24, 
+                                  preset='medium', 
+                                  bitrate="1000k",  # Reduced from 3000k
+                                  threads=4)
         final_video.close() # Explicitly close video clips to release resources
         voiceover_clip.close()
         background_music_clip.close()
@@ -180,6 +224,14 @@ async def assemble_video(video_clip_paths: List[str], voiceover_audio_path: str,
     except Exception as e:
        logging.error(f"Error during video assembly: {e}")
        raise Exception(f"Video assembly failed: {e}")
+    finally:
+        # Ensure resources are cleaned up
+        for clip in video_clips:
+            try:
+                clip.close()
+                os.remove(clip.filename)
+            except Exception as e:
+                logging.warning(f"Error cleaning up {clip.filename}: {e}")
 
 
 async def generate_subtitles(video_path: str, output_filepath:str):
@@ -209,27 +261,39 @@ async def generate_subtitles(video_path: str, output_filepath:str):
           raise Exception(f"Subtitle generation failed: {e}")
 
 
-async def process_video_generation(topic: str) -> str:
+async def process_video_generation(topic: str, video_gallery: list) -> str:
     """Main function to orchestrate video generation."""
     logging.info(f"Starting video generation for topic: '{topic}'")
     try:
-        video_clip_paths = download_youtube_clips(topic)
-        script_text = await generate_script_from_topic(topic)
-        voiceover_audio_path = await generate_voiceover_from_text(script_text)
+        # Get structured script
+        script_data = await generate_script_from_topic(topic)
+        
+        # Download clips for each scene
+        all_clips = []
+        for scene in script_data["scenes"]:
+            scene_clips = download_youtube_clips(scene["search_keywords"], num_clips=1)
+            all_clips.extend(scene_clips)
+        
+        # Generate voiceover from actual script text
+        voiceover_text = " ".join([s["voiceover_text"] for s in script_data["scenes"]])
+        voiceover_path = await generate_voiceover_from_text(voiceover_text)
 
         video_filename = f"autovideo_{uuid.uuid4()}.mp4"
         output_filepath = os.path.join(VIDEO_OUTPUT_DIR, video_filename)
 
-        await assemble_video(video_clip_paths, voiceover_audio_path, BACKGROUND_MUSIC_PATH, output_filepath)
+        await assemble_video(all_clips, voiceover_path, BACKGROUND_MUSIC_PATH, output_filepath)
         await generate_subtitles(output_filepath, output_filepath)
 
         # Clean up temporary files
-        os.remove(voiceover_audio_path)
-        for clip_path in video_clip_paths:
+        os.remove(voiceover_path)
+        for clip_path in all_clips:
             try:
               os.remove(clip_path)
             except:
                 pass
+        
+        # Add to gallery
+        video_gallery.append(output_filepath)
                 
         logging.info("Video generation completed successfully.")
         return output_filepath
@@ -239,10 +303,12 @@ async def process_video_generation(topic: str) -> str:
         raise Exception(f"Video generation process failed: {e}")
 
 # --- Gradio UI ---
+video_gallery_list = [] # Initialize video gallery list
+
 async def generate_video_ui(topic: str) -> str:
     """Generates video from topic and returns path for Gradio."""
     try:
-        output_path = await process_video_generation(topic)
+        output_path = await process_video_generation(topic, video_gallery_list)
         logging.info(f"Generated video at: {output_path}")
         return output_path
     except Exception as e:
@@ -258,7 +324,7 @@ class VideoRequest(BaseModel):
 @app.post("/generate")
 async def generate_video_endpoint(request: VideoRequest):
     try:
-        output_path = await process_video_generation(request.topic)
+        output_path = await process_video_generation(request.topic, video_gallery_list)
         return {
             "status": "success",
             "message": "Video generated successfully",
@@ -274,14 +340,24 @@ async def generate_video_endpoint(request: VideoRequest):
         )
 
 # Create Gradio interface
-    demo = gr.Interface(
-        fn=generate_video_ui,
-        inputs=gr.Textbox(label="Enter Video Topic"),
-        outputs=gr.Video(label="Generated Video"),
-        title="Auto Video AI Generator",
-    description="Enter a topic and get a video generated!",
-    allow_flagging="never"
-)
+def load_existing_videos():
+    """Loads existing videos from the output directory."""
+    existing_videos = []
+    for filename in os.listdir(VIDEO_OUTPUT_DIR):
+        if filename.endswith(".mp4"):
+            existing_videos.append(os.path.join(VIDEO_OUTPUT_DIR, filename))
+    return existing_videos
+
+video_gallery_list.extend(load_existing_videos()) # Load existing videos
+
+with gr.Blocks() as demo:
+    topic_input = gr.Textbox(label="Enter Video Topic")
+    video_output = gr.Video(label="Generated Video")
+    video_gallery = gr.Gallery(label="Video Gallery", value=video_gallery_list)
+
+    topic_input.submit(generate_video_ui, inputs=topic_input, outputs=video_output).then(
+        lambda: video_gallery_list, outputs=video_gallery
+    )
 
 # Launch the Gradio app
 if __name__ == "__main__":
